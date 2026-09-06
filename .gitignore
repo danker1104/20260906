@@ -16,3 +16,8 @@ coverage/
 *.log
 .DS_Store
 .vscode/
+
+# Project-local agent skill installations
+.agents/
+.claude/
+skills-lock.json
