@@ -9,6 +9,8 @@
 node_modules/
 .next/
 *.tsbuildinfo
+infra/main.json
+infra/validation-*.bicepparam
 out/
 dist/
 coverage/
