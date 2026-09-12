@@ -1,0 +1,14 @@
+node_modules
+.next
+.git
+.gitignore
+.env*
+!.env.example
+coverage
+tests
+e2e
+infra
+.azure
+.agents
+.claude
+*.log

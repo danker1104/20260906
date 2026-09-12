@@ -1,0 +1,98 @@
+import { createErrorResponse, ImageValidationError } from '../../../lib/domain/errors';
+import { GeminiConfigurationError } from '../../../lib/ai/gemini-gateway';
+import { getRequestId } from '../../../lib/observability/request-id';
+import { getTotalTimeoutMs, hasDeadlineExpired } from '../../../lib/pipeline/request-deadline';
+import { runIdentifyPipeline } from '../../../lib/pipeline/identify-pipeline';
+import { mapPipelineResponse, ResponseMappingError } from '../../../lib/pipeline/response-mapper';
+import {
+  releasePreparedImages,
+  validateAndPrepareImages,
+} from '../../../lib/validation/image-validation';
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+
+const MAX_REQUEST_BYTES = 32 * 1024 * 1024;
+
+function isImageFile(value: FormDataEntryValue): value is File {
+  return typeof value !== 'string' && typeof value.arrayBuffer === 'function' && typeof value.type === 'string';
+}
+
+export async function POST(request: Request): Promise<Response> {
+  const requestId = getRequestId(request);
+  const startedAt = Date.now();
+  let preparedImages: Awaited<ReturnType<typeof validateAndPrepareImages>> = [];
+
+  try {
+    const contentLength = Number(request.headers.get('content-length') ?? 0);
+    if (contentLength > MAX_REQUEST_BYTES) {
+      return Response.json(
+        createErrorResponse('INVALID_IMAGE', '요청 크기가 허용 범위를 초과했습니다.', requestId),
+        { status: 400 },
+      );
+    }
+
+    let formData: FormData;
+    try {
+      formData = await request.formData();
+    } catch {
+      return Response.json(
+        createErrorResponse('INVALID_IMAGE', 'multipart/form-data 요청이 필요합니다.', requestId),
+        { status: 400 },
+      );
+    }
+    const imageValues = formData.getAll('images');
+    const imageFiles = imageValues.filter(isImageFile);
+
+    if (imageFiles.length !== imageValues.length || imageFiles.length < 1) {
+      return Response.json(
+        createErrorResponse('INVALID_IMAGE', 'images 필드에 이미지 파일을 1장 이상 보내 주세요.', requestId),
+        { status: 400 },
+      );
+    }
+
+    if (hasDeadlineExpired(startedAt)) {
+      return Response.json(
+        createErrorResponse('TIMEOUT', '요청 처리 시간이 초과되었습니다.', requestId),
+        { status: 504 },
+      );
+    }
+
+    preparedImages = await validateAndPrepareImages(imageFiles);
+
+    if (hasDeadlineExpired(startedAt, getTotalTimeoutMs())) {
+      return Response.json(
+        createErrorResponse('TIMEOUT', '요청 처리 시간이 초과되었습니다.', requestId),
+        { status: 504 },
+      );
+    }
+
+    const pipelineResult = await runIdentifyPipeline(preparedImages);
+    return Response.json(mapPipelineResponse(requestId, pipelineResult), { status: 200 });
+  } catch (error) {
+    if (error instanceof ImageValidationError) {
+      return Response.json(createErrorResponse(error.code, error.message, requestId), { status: 400 });
+    }
+
+    if (error instanceof GeminiConfigurationError) {
+      return Response.json(
+        createErrorResponse('UPSTREAM_UNAVAILABLE', 'AI 서비스 설정을 사용할 수 없습니다.', requestId),
+        { status: 503 },
+      );
+    }
+
+    if (error instanceof ResponseMappingError) {
+      return Response.json(
+        createErrorResponse('VALIDATION_FAILED', '결과를 검증하지 못했습니다.', requestId),
+        { status: 502 },
+      );
+    }
+
+    return Response.json(
+      createErrorResponse('INTERNAL_ERROR', '요청을 처리하지 못했습니다.', requestId),
+      { status: 500 },
+    );
+  } finally {
+    releasePreparedImages(preparedImages);
+  }
+}

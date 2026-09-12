@@ -127,15 +127,36 @@ Title and publication states:
 Prefer this structure:
 
 ```text
-src/app/                 Next.js pages and Route Handlers
-src/components/          React UI components
-src/lib/ai/              Gemini adapters and prompts
-src/lib/pipeline/        ①→②→③→④ orchestration
-src/lib/validation/      Image, env, and external response validation
-src/lib/domain/          Shared domain types and state mapping
-tests/                   Unit, integration, and contract tests
-e2e/                     Browser user-flow tests
+MangaFind/
+├─ azure.yaml                         AZD service definition
+├─ Dockerfile                          Production container image
+├─ package.json                        Dependencies and scripts
+├─ next.config.*                       Next.js configuration
+├─ src/
+│  ├─ app/                             Pages and Route Handlers
+│  │  ├─ page.tsx                      Website/PWA search home
+│  │  ├─ layout.tsx                    Shared HTML, metadata, and providers
+│  │  ├─ globals.css                   Global styles and design tokens
+│  │  └─ api/
+│  │     ├─ health/route.ts            Container health probe
+│  │     └─ identify/route.ts           POST /api/identify entry point
+│  ├─ components/                      Shared React UI components
+│  │  ├─ upload/                       Upload, preview, and validation UI
+│  │  ├─ analysis/                     Pipeline progress UI
+│  │  └─ results/                      Candidate and status result UI
+│  └─ lib/
+│     ├─ domain/                       Shared types and status mapping
+│     ├─ pipeline/                     ①→②→③→④ orchestration
+│     ├─ ai/                           Gemini adapters and prompts
+│     ├─ validation/                   Image, environment, and response validation
+│     └─ observability/                Request IDs, logs, and metrics
+├─ tests/                              Unit, integration, and contract tests
+├─ e2e/                                Browser user-flow tests
+├─ infra/                              Azure resources and permissions
+└─ .azure/                             AZD deployment plan and environment state
 ```
+
+`src/app`, `src/components`, and `src/lib` are code responsibility boundaries, not separate AZD services or containers. Website and PWA experiences remain in the same Next.js application.
 
 Keep HTTP orchestration in Route Handlers. Keep prompts, model adapters, business rules, validation, and UI components in their owning modules. Do not put model prompts or candidate-ranking policy directly in a Route Handler.
 

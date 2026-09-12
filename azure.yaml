@@ -1,0 +1,16 @@
+name: mangafind
+metadata:
+  template: mangafind@0.1.0
+
+infra:
+  provider: bicep
+  path: infra
+
+services:
+  web:
+    project: .
+    language: js
+    host: containerapp
+    docker:
+      path: ./Dockerfile
+      context: .

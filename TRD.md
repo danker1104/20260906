@@ -38,15 +38,52 @@
 Python, 별도 OCR 런타임, 별도 검색 서버는 V1에서 사용하지 않는다. 외부 모델 응답은 `unknown`으로 받고 스키마 검증 후 내부 타입으로 변환한다. 클라이언트는 서버 전용 SDK와 Secret을 import하지 않는다.
 
 ```text
-src/app/                 Next.js 페이지와 Route Handler
-src/components/          React UI
-src/lib/ai/              Gemini 어댑터와 프롬프트
-src/lib/pipeline/        ①→②→③→④ 오케스트레이션
-src/lib/validation/      이미지·환경변수·외부 응답 검증
-src/lib/domain/          공유 도메인 타입과 상태 매핑
-tests/                   단위·통합·계약 테스트
-e2e/                     브라우저 테스트
+MangaFind/
+├─ azure.yaml                         AZD 서비스 정의
+├─ Dockerfile                          프로덕션 컨테이너 이미지
+├─ package.json                        의존성 및 실행 스크립트
+├─ next.config.*                       Next.js 설정
+├─ src/
+│  ├─ app/                             페이지와 Route Handler
+│  │  ├─ page.tsx                      Website/PWA 검색 홈
+│  │  ├─ layout.tsx                    공통 HTML·메타데이터·Provider
+│  │  ├─ globals.css                   전역 스타일·디자인 토큰
+│  │  └─ api/
+│  │     ├─ health/route.ts            Container Apps health probe
+│  │     └─ identify/route.ts           POST /api/identify 진입점
+│  ├─ components/                      공유 React UI 컴포넌트
+│  │  ├─ upload/                       업로드·미리보기·입력 오류 UI
+│  │  ├─ analysis/                     파이프라인 진행 상태 UI
+│  │  └─ results/                      후보·상태·결과 UI
+│  └─ lib/
+│     ├─ domain/                       공유 타입 및 상태 매핑
+│     ├─ pipeline/                     ①→②→③→④ 오케스트레이션
+│     ├─ ai/                           Gemini 어댑터 및 프롬프트
+│     ├─ validation/                   이미지·환경변수·응답 검증
+│     └─ observability/                requestId·로그·메트릭
+├─ tests/                              단위·통합·계약 테스트
+├─ e2e/                                브라우저 사용자 흐름 테스트
+├─ infra/                              Azure 리소스 및 권한 정의
+└─ .azure/                             AZD 배포 계획·환경 상태
 ```
+
+이 트리는 논리 구조와 초기 스캐폴딩의 기준이다. `src/app`, `src/components`, `src/lib`는 코드 책임 경계이며 각각 독립 AZD 서비스나 컨테이너가 아니다. Website와 PWA는 하나의 Next.js 앱에서 제공한다.
+
+### 2.1 애플리케이션 루트와 AZD 서비스 경계
+
+MangaFind V1은 Website와 PWA를 별도 애플리케이션이나 별도 AZD 서비스로 나누지 않는다. 하나의 Next.js 애플리케이션이 브라우저 화면, PWA 화면, `/api/health`, `/api/identify`를 함께 제공한다.
+
+프로젝트 루트와 AZD 서비스 루트는 같게 유지한다.
+
+다음 경계를 고정한다.
+
+- `azure.yaml`의 애플리케이션 서비스 이름은 하나만 사용한다.
+- Docker build context와 `Dockerfile` 경로는 프로젝트 루트를 기준으로 한다.
+- `src/app`, `src/lib` 또는 `src/components`를 독립 AZD 서비스나 독립 컨테이너로 등록하지 않는다.
+- Website와 PWA의 표시 차이는 같은 Next.js 앱의 라우팅·렌더링 계층에서 처리한다.
+- `infra/`는 애플리케이션 소스와 분리된 배포 정의이며, 런타임에 번들하거나 이미지에 복사하지 않는다.
+
+이 경계를 지켜야 이후 `azd up`에서 서비스 이름, Docker context, 이미지 경로가 바뀌지 않는다.
 
 ## 3. API 요청 계약
 
@@ -60,6 +97,17 @@ e2e/                     브라우저 테스트
 - 서버가 확장자, MIME, 매직 바이트, 디코딩 가능 여부를 모두 검증
 
 클라이언트 검증은 UX용이며 서버 검증을 대체하지 않는다.
+
+### 3.1 스캐폴딩 단계의 엔드포인트
+
+기능 구현 전 최초 배포에서는 프로세스와 컨테이너 라우팅만 검증할 수 있도록 다음 임시 동작을 허용한다.
+
+- `GET /api/health`: 외부 Gemini, Key Vault, 검색 서비스에 의존하지 않고 애플리케이션 프로세스가 요청을 처리할 수 있으면 HTTP 200을 반환한다.
+- `POST /api/identify`: AI 파이프라인 구현 전에는 HTTP 501과 임시 미구현 응답을 반환할 수 있다.
+
+스캐폴딩용 501 동작은 V1 공개 API 계약이 아니며, 식별 기능 구현 시 성공·부분 성공·오류 계약으로 교체한다. health endpoint에서 Gemini 연결이나 Secret 존재 여부를 검사하지 않는다. 외부 의존성 상태 확인은 별도 운영 진단과 메트릭으로 처리한다.
+
+Container Apps probe는 `/api/health`를 사용하고, API Management 외부 API에는 `/api/identify`만 공개한다. Container Apps backend는 가능하면 외부 직접 접근을 차단하고 API Management를 통해서만 접근하도록 구성한다.
 
 ## 4. 공개 응답 계약
 
@@ -308,6 +356,18 @@ Container Apps 애플리케이션은 Gateway가 전달한 요청 ID를 로그에
 - ③만 실패하면 ④ 실행
 - 외부 호출 취소가 실제 과금까지 중단하는지는 벤치마크로 확인
 
+### 9.1 계층별 timeout 정합성
+
+60초는 애플리케이션의 전체 처리 예산이며, 외부 Gateway나 플랫폼이 이보다 먼저 연결을 끊어서는 안 된다.
+
+- 각 모델 단계는 12초를 넘기지 않는다.
+- 애플리케이션 전체 deadline은 60초로 관리한다.
+- API Management backend timeout과 Container Apps 요청 경로는 애플리케이션의 60초 예산보다 짧지 않게 설정한다.
+- Gateway가 추가하는 인증·정책·네트워크 지연을 고려해 플랫폼 timeout에는 여유를 둔다. 정확한 상한과 지원 범위는 Azure 배포 전 validation에서 확인한다.
+- 브라우저 timeout은 서버가 반환할 수 있는 `TIMEOUT` 또는 구조화된 오류를 수신할 수 있도록 서버·Gateway 계약과 함께 정한다.
+
+환경변수의 기본값은 애플리케이션 deadline을 표현하며, APIM·Container Apps 설정의 복사본으로만 사용하지 않는다.
+
 정상 요청의 기본 호출 수는 Pro 2회와 Flash + Search 2회다. 다음 값을 계측한다.
 
 - 모델별 입력·출력 토큰
@@ -373,18 +433,54 @@ Gemini와 Search를 mock한다.
 - runtime image에 Secret·`.env` 포함 금지
 - non-root 실행 검토
 - health endpoint 제공
+- 프로젝트 루트를 build context로 사용
+- `Dockerfile`은 프로젝트 루트에 두고 Next.js standalone 또는 production start 산출물만 runtime image에 포함
+- `infra/`, 테스트 원본, `.env*`, 로컬 캐시와 원본 업로드 파일은 `.dockerignore`로 제외
+- 이미지가 빌드될 때 Gemini API 호출이나 Key Vault 접근을 수행하지 않음
 
 ### 12.2 Container Apps
 
 TRD 구현 시 CPU·메모리·최소/최대 replica·ingress·probe·ACR pull 권한·Managed Identity를 지정한다. 컨테이너는 stateless로 유지하고 APIM이 외부 rate limit을 담당한다.
 
+초기 스캐폴딩 배포와 기능 구현 후 배포는 같은 AZD 서비스와 같은 Container App을 사용한다. 초기 단계에는 AI 호출 없이도 컨테이너가 기동해야 하며, Gemini Secret이 아직 연결되지 않았다는 이유로 `/api/health`가 실패해서는 안 된다. 기능 구현 후에는 동일한 리소스 경계에 Key Vault Secret 참조와 서버 전용 Gemini 설정만 추가한다.
+
+다음 리소스 경계는 초기 배포부터 최종 배포까지 유지한다.
+
+```text
+Container Registry
+Container Apps Environment
+Container App
+Managed Identity
+Key Vault
+Application Insights
+API Management
+```
+
+초기 배포에서 리소스를 생략했다가 나중에 애플리케이션 endpoint, ingress, Secret 전달 방식을 바꾸는 방식은 피한다. 비용 또는 환경 제약으로 특정 리소스를 임시 생략해야 하는 경우에는 AZD 환경 변수와 인프라 파라미터로 명시하고, 외부 endpoint와 서비스 이름은 유지한다.
+
 ### 12.3 API Management
 
 - `/api/identify`만 외부 공개
+- `/api/health`는 Container Apps probe와 내부 운영 확인용으로 사용하며 기본 외부 API로 공개하지 않음
 - CORS 허용 Origin 제한
 - rate limit과 request size 정책 적용
 - 429와 `Retry-After` 응답 표준화
 - 백엔드 Container Apps 접근 보호
+- backend timeout은 애플리케이션 60초 예산보다 짧지 않게 설정
+- APIM이 생성하거나 전달하는 request ID를 Container Apps와 애플리케이션 로그에서 일관되게 사용
+
+### 12.4 AZD 반복 배포 계약
+
+기능 구현 후 별도 수동 배포 절차를 만들지 않고 `azd up`을 반복할 수 있도록 다음 값을 안정적인 계약으로 취급한다.
+
+- AZD 서비스 이름과 Dockerfile 상대 경로
+- Container App 및 Container Apps Environment의 논리적 이름
+- Key Vault Secret 이름과 Managed Identity 권한 대상
+- 애플리케이션이 받는 환경변수 이름
+- APIM backend와 공개 API 경로
+- infra 출력값과 서비스 간 참조 방식
+
+코드 변경은 이미지 재빌드·Container App revision 갱신으로 반영하고, 인프라 변경은 Bicep 변경으로 반영한다. Secret 값은 `azure.yaml`, Dockerfile, 소스 코드, `.env.example`에 기록하지 않는다.
 
 ## 13. 환경변수 계약
 

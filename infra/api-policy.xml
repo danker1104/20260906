@@ -1,0 +1,18 @@
+<policies>
+  <inbound>
+    <base />
+    <rate-limit-by-key calls="3" renewal-period="60" counter-key="@(context.Request.IpAddress)" />
+    <set-header name="x-request-id" exists-action="skip">
+      <value>@(context.RequestId.ToString())</value>
+    </set-header>
+  </inbound>
+  <backend>
+    <base />
+  </backend>
+  <outbound>
+    <base />
+  </outbound>
+  <on-error>
+    <base />
+  </on-error>
+</policies>
