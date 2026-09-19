@@ -129,6 +129,33 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
     managedEnvironmentId: managedEnvironment.id
     configuration: {
       activeRevisionsMode: 'Single'
+      secrets: [
+        {
+          name: 'gemini-api-key'
+          keyVaultUrl: '${keyVault.properties.vaultUri}secrets/gemini-api-key'
+          identity: managedIdentity.id
+        }
+        {
+          name: 'gemini-flash-model'
+          keyVaultUrl: '${keyVault.properties.vaultUri}secrets/gemini-flash-model'
+          identity: managedIdentity.id
+        }
+        {
+          name: 'ocr-space-api-key'
+          keyVaultUrl: '${keyVault.properties.vaultUri}secrets/ocr-space-api-key'
+          identity: managedIdentity.id
+        }
+        {
+          name: 'tavily-api-key'
+          keyVaultUrl: '${keyVault.properties.vaultUri}secrets/tavily-api-key'
+          identity: managedIdentity.id
+        }
+        {
+          name: 'serpapi-api-key'
+          keyVaultUrl: '${keyVault.properties.vaultUri}secrets/serpapi-api-key'
+          identity: managedIdentity.id
+        }
+      ]
       ingress: {
         external: true
         targetPort: 3000
@@ -155,6 +182,26 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             {
               name: 'NODE_ENV'
               value: 'production'
+            }
+            {
+              name: 'GEMINI_API_KEY'
+              secretRef: 'gemini-api-key'
+            }
+            {
+              name: 'GEMINI_FLASH_MODEL'
+              secretRef: 'gemini-flash-model'
+            }
+            {
+              name: 'OCR_SPACE_API_KEY'
+              secretRef: 'ocr-space-api-key'
+            }
+            {
+              name: 'TAVILY_API_KEY'
+              secretRef: 'tavily-api-key'
+            }
+            {
+              name: 'SERPAPI_API_KEY'
+              secretRef: 'serpapi-api-key'
             }
           ]
         }
