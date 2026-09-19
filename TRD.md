@@ -8,9 +8,8 @@
 
 - TypeScript, Node.js, Next.js App Router, React, Tailwind CSS
 - 동기식 `POST /api/identify`
-- Gemini 2.5 Pro 이미지 분석과 최종 판정
-- Gemini 2.5 Flash + `google_search` 일본·한국 정보 검색
-- ③ 한국 검색 실패 시에도 ④ 최종 판정 실행
+- Gemini 이미지 분석·Google Search grounding 1회와 최종 판정 1회
+- 정상 요청당 Gemini 호출 2회 제한
 - 단계별 timeout 12초, 전체 timeout 60초
 - 서버 자동 재시도 없음
 - 전역 rate limit: Azure API Management
@@ -27,7 +26,7 @@
 | 런타임 | Node.js LTS |
 | 웹 | Next.js App Router, React |
 | 스타일 | Tailwind CSS |
-| AI | Gemini API, `gemini-2.5-pro`, `gemini-2.5-flash` |
+| AI | Gemini API, `gemini-3.8-flash` for image analysis |
 | 검색 | Gemini `google_search` 도구 |
 | 검증 | TypeScript 타입 + JSON Schema 또는 Zod |
 | 테스트 | TypeScript 단위·통합·계약 테스트, Playwright E2E |
@@ -57,7 +56,7 @@ MangaFind/
 │  │  └─ results/                      후보·상태·결과 UI
 │  └─ lib/
 │     ├─ domain/                       공유 타입 및 상태 매핑
-│     ├─ pipeline/                     ①→②→③→④ 오케스트레이션
+│     ├─ pipeline/                     ①→② 오케스트레이션
 │     ├─ ai/                           Gemini 어댑터 및 프롬프트
 │     ├─ validation/                   이미지·환경변수·응답 검증
 │     └─ observability/                requestId·로그·메트릭
@@ -112,7 +111,7 @@ Container Apps probe는 `/api/health`를 사용하고, API Management 외부 API
 ## 4. 공개 응답 계약
 
 ```typescript
-type IdentifyStatus = 'SUCCESS' | 'PARTIAL_SUCCESS' | 'INSUFFICIENT' | 'FAILED';
+type IdentifyStatus = 'SUCCESS' | 'INSUFFICIENT' | 'FAILED';
 type StageStatus = 'SUCCESS' | 'PARTIAL' | 'INSUFFICIENT' | 'FAILED' | 'TIMEOUT' | 'SKIPPED';
 type Confidence = 'HIGH' | 'MEDIUM' | 'LOW';
 type KoreanTitleStatus = 'OFFICIAL' | 'COMMON' | 'TRANSLATED' | 'UNKNOWN';
@@ -145,8 +144,6 @@ interface IdentifyResponse {
 	requestId: string;
 	stages: {
 		imageAnalysis: StageStatus;
-		japaneseIdentification: StageStatus;
-		koreanInvestigation: StageStatus;
 		finalJudgment: StageStatus;
 	};
 	candidates: Candidate[];
@@ -157,7 +154,6 @@ interface IdentifyResponse {
 
 - 후보는 최대 3개이며 `rank`는 1부터 연속 부여한다.
 - `SUCCESS`에서 `koreanTitle`은 문자열이다.
-- `PARTIAL_SUCCESS`에서 한국 정보가 없는 후보는 `koreanTitle: null`, 제목 상태와 정발 상태는 `UNKNOWN`이다.
 - `evidence`는 1~5개의 enum 배열이다.
 - 검색 원문, 출처 URL 목록, 프롬프트, API Key는 공개 응답에 포함하지 않는다.
 
@@ -185,31 +181,29 @@ interface ErrorResponse {
 
 이미지 형식·크기·손상 오류는 HTTP 400 `INVALID_IMAGE`로 반환한다. 오류 응답에는 외부 오류 원문, 스택 트레이스, 내부 프롬프트, Secret을 포함하지 않는다.
 
-### 4.2 ③ 실패 후 ④ 실행 계약
+### 4.2 2회 호출 실패 계약
 
-③이 `PARTIAL`, `INSUFFICIENT`, `FAILED`, `TIMEOUT`이어도 ②가 후보를 반환하면 ④를 실행한다. ④는 ① JSON과 ② 후보를 사용하고, 한국 정보가 없는 후보에는 `UNKNOWN`을 채운다.
+①은 이미지 OCR·단서 추출과 Google Search grounding을 함께 수행한다. ②는 ①의 검증된 결과를 받아 일본 후보 TOP 3, 한국 제목, 정발 여부, 근거를 한 번에 반환한다. ①이 `INSUFFICIENT`, `FAILED`, `TIMEOUT`이면 ②는 `SKIPPED`다. ②가 실패하거나 schema 검증에 실패하면 `FAILED`와 빈 후보 배열을 반환한다.
 
 ```json
 {
-	"status": "PARTIAL_SUCCESS",
+	"status": "SUCCESS",
 	"requestId": "request-id",
 	"stages": {
 		"imageAnalysis": "SUCCESS",
-		"japaneseIdentification": "SUCCESS",
-		"koreanInvestigation": "TIMEOUT",
 		"finalJudgment": "SUCCESS"
 	},
 	"candidates": [
 		{
 			"rank": 1,
 			"japaneseTitle": "星の下の彼女",
-			"koreanTitle": null,
-			"koreanTitleStatus": "UNKNOWN",
-			"publicationStatus": "UNKNOWN",
+			"koreanTitle": "별 아래의 그녀",
+			"koreanTitleStatus": "COMMON",
+			"publicationStatus": "NOT_FOUND",
 			"confidence": "HIGH",
 			"evidence": ["DIALOGUE_MATCH"],
 			"author": "山田太郎",
-			"koreanInvestigationStatus": "TIMEOUT"
+			"koreanInvestigationStatus": "SUCCESS"
 		}
 	]
 }
@@ -220,10 +214,8 @@ interface ErrorResponse {
 ```text
 request-control
 → validateAndPrepareImages
-→ analyzeImages
-→ searchJapaneseCandidates
-→ searchKoreanInformation
-→ judgeCandidates
+→ analyzeImagesAndSearch
+→ finalJudgment
 → validateAndMapResponse
 ```
 
@@ -248,51 +240,23 @@ interface ImageAnalysisResult {
 
 이 단계는 작품을 확정하거나 최종 순위를 정하지 않는다. 단서가 없으면 `INSUFFICIENT`, 외부 오류·Schema 오류면 `FAILED`다.
 
-### 5.2 ② 일본 후보 검색: Gemini 2.5 Flash + Google Search
+### 5.2 ② 최종 판정: Gemini
 
-①의 검증된 JSON을 입력으로 받고 `google_search` 도구를 활성화한다.
+①의 검증된 OCR·단서·검색 결과 JSON을 입력으로 받는다.
 
-- 후보별 검색 요약과 `searchSupport`를 생성한다.
-- `evidence`가 비어 있는 후보는 서버 어댑터에서 제거한다.
-- 남은 후보를 rank 순으로 정렬하고 최대 3개만 전달한다.
-- 후보가 0개면 `japaneseIdentification = INSUFFICIENT`다.
-- 후보 rank는 ③과 ④에서 변경하지 않는다.
-
-### 5.3 ③ 한국 정보 검색: Gemini 2.5 Flash + Google Search
-
-②의 rank가 고정된 후보 1~3개를 한 번의 Flash + Search 호출에 전달한다.
-
-- 후보별 공식 제목·통용명·AI 번역·정발 여부를 조사한다.
-- 입력 후보의 rank와 출력 `candidateResults[].rank`는 같아야 한다.
-- 후보별 결과가 모두 완료되면 `SUCCESS`, 일부만 완료되면 `PARTIAL`이다.
-- 검색 결과가 없으면 `INSUFFICIENT`, 외부 오류면 `FAILED`, 시간 초과면 `TIMEOUT`이다.
-- 한 후보의 실패가 다른 후보의 성공을 무효화하지 않는다.
-
-### 5.4 ④ 최종 판정: Gemini 2.5 Pro
-
-① 이미지 분석 JSON, ② 후보 TOP 3, ③ 후보별 결과 또는 실패 상태를 입력으로 받는다.
-
-- 원본 이미지를 다시 전달하지 않는다.
-- `google_search`를 사용하지 않는다.
-- ③이 실패해도 ② 후보가 있으면 실행한다.
-- ② 후보와 ③ 한국 정보를 연결하고 순위를 재평가한다.
-- 근거 없는 주장을 제거하고 제목·정발 상태 조합을 검증한다.
-- ④ timeout·외부 오류·Schema 검증 실패는 `FAILED`이며 후보를 반환하지 않는다.
+- 일본 작품 후보 TOP 3을 선정한다.
+- 후보별 한국 제목·정발 여부·근거·판정 수준을 반환한다.
+- 근거 없는 후보는 반환하지 않는다.
 
 ## 6. 상태 전파
 
 | 조건 | 실행하지 않는 단계 | 최상위 상태 | 후보 |
 |---|---|---|---|
 | 이미지 검증 실패 | 모델 전체 | HTTP 400 `INVALID_IMAGE` | 없음 |
-| ① `INSUFFICIENT` | ②·③·④ | `INSUFFICIENT` | 빈 배열 |
-| ① `FAILED`·`TIMEOUT` | ②·③·④ | `FAILED` | 빈 배열 |
-| ② `INSUFFICIENT` | ③·④ | `INSUFFICIENT` | 빈 배열 |
-| ② `FAILED`·`TIMEOUT` | ③·④ | `FAILED` | 빈 배열 |
-| ③ `SUCCESS` | 없음 | ④ 결과에 따름 | TOP 1~3 |
-| ③ `PARTIAL`·`INSUFFICIENT`·`FAILED`·`TIMEOUT` | 없음 | ④ 성공 시 `PARTIAL_SUCCESS` | TOP 1~3 |
-| ④ `FAILED`·`TIMEOUT`·검증 실패 | 요청 종료 | `FAILED` | 빈 배열 |
-
-③ 실패는 ④를 `SKIPPED`로 만들지 않는다. ④는 한국 정보 없는 일본 후보 판정 모드로 실행한다.
+| ① `INSUFFICIENT` | ② | `INSUFFICIENT` | 빈 배열 |
+| ① `FAILED`·`TIMEOUT` | ② | `FAILED` | 빈 배열 |
+| ② `SUCCESS` | 없음 | `SUCCESS` | TOP 1~3 |
+| ② `FAILED`·`TIMEOUT`·검증 실패 | 요청 종료 | `FAILED` | 빈 배열 |
 
 ## 7. 이미지 처리·보안
 
@@ -342,10 +306,8 @@ Container Apps 애플리케이션은 Gateway가 전달한 요청 ID를 로그에
 
 | 단계 | 최대 시간 |
 |---|---:|
-| ① 이미지 분석 | 12초 |
-| ② 일본 검색 | 12초 |
-| ③ 한국 검색 | 12초 |
-| ④ 최종 판정 | 12초 |
+| ① 이미지 분석·검색 grounding | 12초 |
+| ② 최종 후보·한국 정보 판정 | 12초 |
 | 검증·응답·네트워크 여유 | 12초 |
 | 전체 | 60초 |
 
@@ -353,7 +315,7 @@ Container Apps 애플리케이션은 Gateway가 전달한 요청 ID를 로그에
 
 - timeout 시 해당 단계 상태 기록
 - 다음 단계 입력이 없으면 다음 단계를 `SKIPPED`
-- ③만 실패하면 ④ 실행
+- ① 실패 시 ②는 `SKIPPED`
 - 외부 호출 취소가 실제 과금까지 중단하는지는 벤치마크로 확인
 
 ### 9.1 계층별 timeout 정합성
@@ -368,7 +330,7 @@ Container Apps 애플리케이션은 Gateway가 전달한 요청 ID를 로그에
 
 환경변수의 기본값은 애플리케이션 deadline을 표현하며, APIM·Container Apps 설정의 복사본으로만 사용하지 않는다.
 
-정상 요청의 기본 호출 수는 Pro 2회와 Flash + Search 2회다. 다음 값을 계측한다.
+정상 요청의 기본 호출 수는 Gemini 2회다. 다음 값을 계측한다.
 
 - 모델별 입력·출력 토큰
 - Search 사용 여부와 검색 메타데이터
@@ -407,12 +369,11 @@ Container Apps 애플리케이션은 Gateway가 전달한 요청 ID를 로그에
 
 Gemini와 Search를 mock한다.
 
-- ①→②→③→④ 모두 성공
-- ③ `INSUFFICIENT` → ④ 실행 → `PARTIAL_SUCCESS`
-- ③ `FAILED` → ④ 실행 → `PARTIAL_SUCCESS`
-- ③ `TIMEOUT` → ④ 실행 → `PARTIAL_SUCCESS`
-- ④ timeout·검증 실패 → `FAILED`
-- ② 실패 → ③·④ `SKIPPED`
+- ①→② 모두 성공
+- ① `INSUFFICIENT` → ② `SKIPPED` → `INSUFFICIENT`
+- ① `FAILED`·`TIMEOUT` → ② `SKIPPED` → `FAILED`
+- ② timeout·검증 실패 → `FAILED`
+- 2회 호출 상한 확인
 - 이미지 검증 실패 → HTTP 400
 - APIM 429 응답 매핑
 
@@ -488,10 +449,11 @@ API Management
 
 ```text
 GEMINI_API_KEY
-GEMINI_PRO_MODEL=gemini-2.5-pro
-GEMINI_FLASH_MODEL=gemini-2.5-flash
+GEMINI_PRO_MODEL=gemini-3.8-flash
+GEMINI_FLASH_MODEL=gemini-3.8-flash
 IDENTIFY_STAGE_TIMEOUT_MS=12000
 IDENTIFY_TOTAL_TIMEOUT_MS=60000
+GEMINI_INTER_CALL_DELAY_MS=5000
 MAX_IMAGES=3
 MAX_IMAGE_BYTES=10485760
 MAX_IMAGE_PIXELS=64000000
@@ -506,8 +468,8 @@ Secret 값은 Dockerfile, Git, `.env.example`, 브라우저 코드에 넣지 않
 ## 14. TRD 완료 조건
 
 - [ ] 요청·성공·부분 성공·오류 Schema가 코드로 검증됨
-- [ ] ③ 실패 후 ④ 실행 통합 테스트 통과
-- [ ] ④ 실패 시 원시 결과 미노출
+- [ ] ① 실패 시 ② `SKIPPED` 통합 테스트 통과
+- [ ] ② 실패 시 원시 결과 미노출
 - [ ] 이미지 버퍼 정리와 손상 파일 테스트 존재
 - [ ] APIM rate limit을 staging에서 검증
 - [ ] Key Vault Managed Identity 접근 검증

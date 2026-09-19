@@ -1,225 +1,87 @@
 import { z } from 'zod';
-import {
-  imageAnalysisResultSchema,
-  japaneseSearchResultSchema,
-  koreanInvestigationResultSchema,
-  candidateSchema,
-  type ImageAnalysisResultInput,
-  type JapaneseSearchResultInput,
-  type KoreanInvestigationResultInput,
-} from '../domain/schemas';
-import type { PreparedImage, Candidate, StageStatus } from '../domain/types';
+import { candidateSchema } from '../domain/schemas';
+import type { Candidate, StageStatus } from '../domain/types';
 import { getConfiguredModel, type GeminiGateway } from '../ai/gemini-gateway';
-import {
-  finalJudgmentPrompt,
-  imageAnalysisPrompt,
-  japaneseSearchPrompt,
-  koreanInvestigationPrompt,
-} from '../ai/prompts';
-import { generateJson, getStageTimeoutMs, StageExecutionError, withStageTimeout, type StageOutcome } from './stage-utils';
+import { finalJudgmentPrompt } from '../ai/prompts';
+import { classifyUpstreamError, generateJson, getStageTimeoutMs, isQuotaError, StageExecutionError, withStageTimeout, type StageOutcome } from './stage-utils';
+import type { ResearchBundle } from '../search/types';
+import type { VerificationStatus } from '../domain/types';
 
-function jsonConfig(tools?: unknown[]): Record<string, unknown> {
+function jsonConfig(): Record<string, unknown> {
   return {
     responseMimeType: 'application/json',
-    ...(tools ? { tools } : {}),
   };
-}
-
-function imageContents(images: PreparedImage[]): Array<Record<string, unknown>> {
-  return [
-    { text: imageAnalysisPrompt },
-    ...images.map((image) => ({
-      inlineData: {
-        mimeType: image.mimeType,
-        data: image.buffer.toString('base64'),
-      },
-    })),
-  ];
-}
-
-function hasImageClues(result: ImageAnalysisResultInput): boolean {
-  return [
-    result.japaneseTexts,
-    result.suspectedTitles,
-    result.characterNames,
-    result.authorClues,
-    result.publisherClues,
-    result.serializationClues,
-    result.visualClues,
-  ].some((clues) => clues.length > 0);
-}
-
-export async function analyzeImages(
-  gateway: GeminiGateway,
-  images: PreparedImage[],
-): Promise<StageOutcome<ImageAnalysisResultInput>> {
-  try {
-    const result = await withStageTimeout(
-      generateJson(gateway, {
-        model: getConfiguredModel('pro'),
-        contents: imageContents(images),
-        config: jsonConfig(),
-      }, imageAnalysisResultSchema),
-      getStageTimeoutMs(),
-    );
-
-    if (result.imageStatuses.every((status) => status === 'FAILED')) {
-      return { status: 'FAILED' };
-    }
-
-    if (!hasImageClues(result)) {
-      return { status: 'INSUFFICIENT', data: result };
-    }
-
-    return { status: 'SUCCESS', data: result };
-  } catch (error) {
-    if (error instanceof StageExecutionError && error.message.includes('시간이 초과')) {
-      return { status: 'TIMEOUT' };
-    }
-    return { status: 'FAILED' };
-  }
-}
-
-export async function searchJapaneseCandidates(
-  gateway: GeminiGateway,
-  imageAnalysis: ImageAnalysisResultInput,
-): Promise<StageOutcome<JapaneseSearchResultInput>> {
-  try {
-    const result = await withStageTimeout(
-      generateJson(gateway, {
-        model: getConfiguredModel('flash'),
-        contents: japaneseSearchPrompt(imageAnalysis),
-        config: jsonConfig([{ googleSearch: {} }]),
-      }, japaneseSearchResultSchema),
-      getStageTimeoutMs(),
-    );
-
-    const candidates = result.candidates
-      .filter((candidate) => candidate.evidence.length > 0)
-      .slice(0, 3)
-      .map((candidate, index) => ({ ...candidate, rank: (index + 1) as 1 | 2 | 3 }));
-
-    if (candidates.length === 0) {
-      return { status: 'INSUFFICIENT', data: { candidates: [] } };
-    }
-
-    return { status: 'SUCCESS', data: { candidates } };
-  } catch (error) {
-    if (error instanceof StageExecutionError && error.message.includes('시간이 초과')) {
-      return { status: 'TIMEOUT' };
-    }
-    return { status: 'FAILED' };
-  }
-}
-
-function koreanStatus(results: KoreanInvestigationResultInput, candidateCount: number): StageStatus {
-  const statuses = Array.from({ length: candidateCount }, (_, index) => {
-    const rank = index + 1;
-    return results.candidateResults.find((result) => result.rank === rank)?.investigationStatus ?? 'INSUFFICIENT';
-  });
-
-  if (statuses.every((status) => status === 'SUCCESS')) {
-    return 'SUCCESS';
-  }
-  if (statuses.some((status) => status === 'SUCCESS')) {
-    return 'PARTIAL';
-  }
-  if (statuses.some((status) => status === 'FAILED')) {
-    return 'FAILED';
-  }
-  if (statuses.some((status) => status === 'TIMEOUT')) {
-    return 'TIMEOUT';
-  }
-  return 'INSUFFICIENT';
-}
-
-function mergeFinalCandidates(
-  finalCandidates: Candidate[],
-  japaneseCandidates: JapaneseSearchResultInput,
-  koreanInvestigation: KoreanInvestigationResultInput | undefined,
-  koreanStageStatus: StageStatus,
-): Candidate[] {
-  return japaneseCandidates.candidates.map((japaneseCandidate) => {
-    const finalCandidate = finalCandidates.find((candidate) => candidate.rank === japaneseCandidate.rank);
-    if (!finalCandidate) {
-      throw new StageExecutionError('최종 판정 결과에 일본 후보 rank가 누락되었습니다.');
-    }
-
-    const koreanResult = koreanInvestigation?.candidateResults.find(
-      (result) => result.rank === japaneseCandidate.rank,
-    );
-    const candidateKoreanStatus = koreanResult?.investigationStatus ?? koreanStageStatus;
-    const hasUsableKoreanResult = candidateKoreanStatus === 'SUCCESS' && koreanResult;
-
-    return {
-      ...finalCandidate,
-      rank: japaneseCandidate.rank,
-      japaneseTitle: japaneseCandidate.japaneseTitle,
-      author: japaneseCandidate.author,
-      koreanTitle: hasUsableKoreanResult ? koreanResult.koreanTitle : null,
-      koreanTitleStatus: hasUsableKoreanResult ? koreanResult.koreanTitleStatus : 'UNKNOWN',
-      publicationStatus: hasUsableKoreanResult ? koreanResult.publicationStatus : 'UNKNOWN',
-      koreanInvestigationStatus: candidateKoreanStatus,
-    };
-  });
-}
-
-export async function investigateKoreanInformation(
-  gateway: GeminiGateway,
-  japaneseCandidates: JapaneseSearchResultInput,
-): Promise<StageOutcome<KoreanInvestigationResultInput>> {
-  try {
-    const result = await withStageTimeout(
-      generateJson(gateway, {
-        model: getConfiguredModel('flash'),
-        contents: koreanInvestigationPrompt(japaneseCandidates.candidates),
-        config: jsonConfig([{ googleSearch: {} }]),
-      }, koreanInvestigationResultSchema),
-      getStageTimeoutMs(),
-    );
-
-    return {
-      status: koreanStatus(result, japaneseCandidates.candidates.length),
-      data: result,
-    };
-  } catch (error) {
-    if (error instanceof StageExecutionError && error.message.includes('시간이 초과')) {
-      return { status: 'TIMEOUT' };
-    }
-    return { status: 'FAILED' };
-  }
 }
 
 const finalJudgmentSchema = z.object({ candidates: z.array(candidateSchema).max(3) });
 
-export async function judgeCandidates(
+function isTransientGeminiError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const candidate = error as { status?: unknown; message?: unknown };
+  const status = Number(candidate.status);
+  const message = String(candidate.message ?? '').toLowerCase();
+  return [500, 502, 503, 504].includes(status)
+    || message.includes('service unavailable')
+    || message.includes('high demand')
+    || message.includes('temporarily unavailable');
+}
+
+function retryDelayMs(attempt: number): number {
+  const configured = Number(process.env.GEMINI_RETRY_BASE_MS ?? 1_000);
+  const base = Number.isFinite(configured) && configured >= 0 ? configured : 1_000;
+  return Math.min(base * (2 ** attempt), 4_000) + Math.floor(Math.random() * 250);
+}
+
+async function waitForRetry(attempt: number): Promise<void> {
+  const delay = retryDelayMs(attempt);
+  if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+}
+
+async function generateJudgmentWithRetries(
   gateway: GeminiGateway,
-  imageAnalysis: ImageAnalysisResultInput,
-  japaneseCandidates: JapaneseSearchResultInput,
-  koreanInvestigation: KoreanInvestigationResultInput | undefined,
+  model: string,
+  research: ResearchBundle,
+): Promise<Candidate[]> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    console.info('[GEMINI PRIMARY]', { model, status: attempt === 0 ? 'started' : 'retrying' });
+    try {
+      const result = await withStageTimeout(
+        generateJson(gateway, { model, contents: finalJudgmentPrompt(research), config: jsonConfig() }, finalJudgmentSchema),
+        getStageTimeoutMs(),
+      );
+      console.info('[GEMINI PRIMARY]', { model, status: 'success' });
+      return result.candidates;
+    } catch (error) {
+      if (!isTransientGeminiError(error) || attempt === 2) throw error;
+      console.info('[GEMINI RETRY]', { attempt: attempt + 1, status: classifyUpstreamError(error) });
+      await waitForRetry(attempt);
+    }
+  }
+  throw new Error('Gemini primary model failed');
+}
+
+export async function finalJudgment(
+  gateway: GeminiGateway,
+  research: ResearchBundle,
 ): Promise<StageOutcome<Candidate[]>> {
   try {
-    const result = await withStageTimeout(
-      generateJson(gateway, {
-        model: getConfiguredModel('pro'),
-        contents: finalJudgmentPrompt(imageAnalysis, japaneseCandidates.candidates, koreanInvestigation ?? { candidateResults: [] }),
-        config: jsonConfig(),
-      }, finalJudgmentSchema),
-      getStageTimeoutMs(),
-    );
-
-    if (result.candidates.length === 0) {
-      return { status: 'FAILED' };
+    const primaryModel = getConfiguredModel();
+    try {
+      const candidates = await generateJudgmentWithRetries(gateway, primaryModel, research);
+      if (candidates.length === 0) return { status: 'INSUFFICIENT', data: [], verificationStatus: 'INSUFFICIENT_EVIDENCE' };
+      return { status: 'SUCCESS', data: candidates, verificationStatus: 'VERIFIED' };
+    } catch (primaryError) {
+      if (isQuotaError(primaryError)) return { status: 'FAILED', failureReason: 'RATE_LIMITED', verificationStatus: 'RATE_LIMITED' };
+      if (!isTransientGeminiError(primaryError)) throw primaryError;
+      return {
+        status: 'FAILED',
+        failureReason: 'UPSTREAM_ERROR',
+        verificationStatus: 'AI_UNAVAILABLE',
+      };
     }
-
-    return {
-      status: 'SUCCESS',
-      data: mergeFinalCandidates(result.candidates, japaneseCandidates, koreanInvestigation, koreanInvestigation ? koreanStatus(koreanInvestigation, japaneseCandidates.candidates.length) : 'FAILED'),
-    };
   } catch (error) {
-    if (error instanceof StageExecutionError && error.message.includes('시간이 초과')) {
-      return { status: 'TIMEOUT' };
-    }
-    return { status: 'FAILED' };
+    if (error instanceof StageExecutionError) return { status: error.reason === 'TIMEOUT' ? 'TIMEOUT' : 'FAILED', failureReason: error.reason };
+    console.error(JSON.stringify({ event: 'gemini_stage_error', stage: 'finalJudgment', reason: classifyUpstreamError(error) }));
+    return { status: 'FAILED', failureReason: 'UPSTREAM_ERROR', verificationStatus: 'AI_UNAVAILABLE' };
   }
 }

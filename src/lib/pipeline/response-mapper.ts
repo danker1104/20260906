@@ -18,6 +18,7 @@ export function mapPipelineResponse(
     requestId,
     stages: result.stages,
     candidates: result.candidates,
+    ...(result.analysis ? { analysis: result.analysis } : {}),
   };
   const parsed = identifyResponseSchema.safeParse(response);
 

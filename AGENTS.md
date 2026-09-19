@@ -31,7 +31,7 @@ If a requested change conflicts with a higher-priority document, identify the co
 - Node.js LTS
 - Next.js App Router and React
 - Tailwind CSS
-- Gemini API with `gemini-2.5-pro` and `gemini-2.5-flash`
+- Gemini API with `gemini-3.8-flash` for image analysis
 - Gemini `google_search` tool for Japanese and Korean information searches
 - JSON Schema or Zod validation at external boundaries
 - Docker and Azure Container Apps
@@ -47,25 +47,20 @@ The request pipeline is synchronous and must preserve this order:
 
 ```text
 Image validation
-→ ① Gemini 2.5 Pro image analysis
-→ ② Gemini 2.5 Flash + Google Search Japanese candidate search
-→ ③ Gemini 2.5 Flash + Google Search Korean information search
-→ ④ Gemini 2.5 Pro final judgment
+- ① Gemini image analysis + Google Search grounding
+- ② Gemini final judgment with Japanese candidates, Korean title, publication status, and evidence
 → Response schema validation
 → UI result
 ```
 
 Pipeline rules:
 
-- ① extracts Japanese text and visual clues; it does not identify the final work.
-- ② returns ranked Japanese candidates, maximum three, with evidence.
-- ③ receives the fixed ranks from ② and returns Korean title/publication information per candidate in one Flash + Search step.
-- ③ may return `PARTIAL`, `INSUFFICIENT`, `FAILED`, or `TIMEOUT` per candidate.
-- If ② has candidates, ④ must still run when ③ fails, times out, or returns insufficient information.
-- When ③ fails and ④ succeeds, the top-level status is `PARTIAL_SUCCESS`; missing Korean fields are `UNKNOWN` and `koreanTitle` is `null`.
-- If ④ fails, times out, or fails schema validation, return `FAILED` with an empty candidate list. Never expose raw intermediate model output.
-- ④ does not receive the original image and does not perform new web searches.
-- Preserve candidate ranks across ②, ③, and ④.
+- ① extracts OCR, visual clues, search queries, and compact Google Search findings.
+- ② receives only the verified ① result and returns Japanese TOP 3, Korean title, publication status, confidence, and evidence.
+- The normal request uses exactly two Gemini calls. No automatic retry is allowed.
+- If ① is insufficient, ② is skipped and the top-level status is `INSUFFICIENT`.
+- If either call fails, times out, or fails schema validation, return `FAILED` with an empty candidate list. Never expose raw intermediate model output.
+- Preserve candidate ranks in the final response.
 
 ## API and Type Boundaries
 
@@ -112,7 +107,7 @@ Title and publication states:
 - Analysis UI must mirror the real pipeline: image clues, Japanese search, Korean search, final result.
 - Never show invented progress percentages or completed stages that have not completed.
 - Use `HIGH`, `MEDIUM`, and `LOW` as ordinal judgment levels, never numeric probabilities.
-- Show `PARTIAL_SUCCESS` clearly: Japanese result may be shown, while Korean title/publication fields say `확인 불충분`.
+- Show `PARTIAL_SUCCESS` clearly: candidates may be shown while unknown Korean fields say `확인 불충분`.
 - Keep optional fields such as cover, genre, publisher, serialization, and status hidden unless confirmed.
 - Preserve layout for missing images and null fields; never render broken empty cards.
 - Keep results in the current browser session only in V1. Do not encode results in URLs. On direct reload/re-entry, route the user back to search home.
@@ -146,7 +141,7 @@ MangaFind/
 │  │  └─ results/                      Candidate and status result UI
 │  └─ lib/
 │     ├─ domain/                       Shared types and status mapping
-│     ├─ pipeline/                     ①→②→③→④ orchestration
+│     ├─ pipeline/                     ①→② orchestration
 │     ├─ ai/                           Gemini adapters and prompts
 │     ├─ validation/                   Image, environment, and response validation
 │     └─ observability/                Request IDs, logs, and metrics
@@ -199,8 +194,8 @@ Do not install or invoke a skill merely because it is listed. Load the relevant 
 Before considering V1 implementation complete:
 
 - Validate image boundaries and invalid-file behavior.
-- Test all pipeline states, especially ③ failure followed by ④ success.
-- Test ④ schema failure returns `FAILED` without raw intermediate output.
+- Test ① insufficient/failure and ② schema failure states.
+- Test ② failure returns `FAILED` without raw intermediate output.
 - Test title/publication state combinations and nullable fields.
 - Run the 30-request benchmark: 1, 2, and 3 image cases, including success, insufficient search, and Korean-information partial failure.
 - Verify p95 total latency is at most 60 seconds and cost is within the approved budget.

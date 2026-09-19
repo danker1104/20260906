@@ -49,14 +49,13 @@ export function createGeminiGateway(): GeminiGateway {
   return new GoogleGenAiGateway(apiKey);
 }
 
-export function getConfiguredModel(name: 'pro' | 'flash'): string {
-  const configuredModel = name === 'pro'
-    ? process.env.GEMINI_PRO_MODEL
-    : process.env.GEMINI_FLASH_MODEL;
+export function getConfiguredModel(): string {
+  const configuredModel = process.env.GEMINI_FLASH_MODEL;
 
   if (!configuredModel) {
-    throw new Error(`${name} Gemini 모델이 설정되지 않았습니다.`);
+    throw new Error('GEMINI_FLASH_MODEL이 설정되지 않았습니다.');
   }
 
   return configuredModel;
 }
+

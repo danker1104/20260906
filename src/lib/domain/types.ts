@@ -20,6 +20,15 @@ export type KoreanTitleStatus = (typeof koreanTitleStatuses)[number];
 export const publicationStatuses = ['CONFIRMED', 'NOT_FOUND', 'UNKNOWN'] as const;
 export type PublicationStatus = (typeof publicationStatuses)[number];
 
+export const verificationStatuses = [
+  'VERIFIED',
+  'SEARCH_VERIFIED',
+  'AI_UNAVAILABLE',
+  'RATE_LIMITED',
+  'INSUFFICIENT_EVIDENCE',
+] as const;
+export type VerificationStatus = (typeof verificationStatuses)[number];
+
 export const evidenceCodes = [
   'DIALOGUE_MATCH',
   'CHARACTER_NAME_MATCH',
@@ -35,6 +44,7 @@ export type EvidenceCode = (typeof evidenceCodes)[number];
 export interface Candidate {
   rank: 1 | 2 | 3;
   japaneseTitle: string;
+  pronunciation?: string | null;
   koreanTitle: string | null;
   koreanTitleStatus: KoreanTitleStatus;
   publicationStatus: PublicationStatus;
@@ -49,11 +59,25 @@ export interface IdentifyResponse {
   requestId: string;
   stages: {
     imageAnalysis: StageStatus;
-    japaneseIdentification: StageStatus;
-    koreanInvestigation: StageStatus;
     finalJudgment: StageStatus;
   };
   candidates: Candidate[];
+  verificationStatus?: VerificationStatus;
+  analysis?: ImageAnalysis;
+}
+
+export interface ImageAnalysis {
+  ocr: string[];
+  dialogues: string[];
+  characterNames: string[];
+  possibleTitles: string[];
+  authorNames: string[];
+  publishers: string[];
+  otherClues: string[];
+  searchQueries: {
+    japanese: string[];
+    korean: string[];
+  };
 }
 
 export type ErrorCode =
@@ -81,4 +105,10 @@ export interface PreparedImage {
   mimeType: SupportedImageMimeType;
   width: number;
   height: number;
+}
+
+export interface SearchGroundingResult {
+  query: string;
+  summary: string;
+  evidence: string[];
 }

@@ -4,6 +4,7 @@ import { getRequestId } from '../../../lib/observability/request-id';
 import { getTotalTimeoutMs, hasDeadlineExpired } from '../../../lib/pipeline/request-deadline';
 import { runIdentifyPipeline } from '../../../lib/pipeline/identify-pipeline';
 import { mapPipelineResponse, ResponseMappingError } from '../../../lib/pipeline/response-mapper';
+import { logIdentifyEvent } from '../../../lib/observability/event-logger';
 import {
   releasePreparedImages,
   validateAndPrepareImages,
@@ -22,6 +23,7 @@ export async function POST(request: Request): Promise<Response> {
   const requestId = getRequestId(request);
   const startedAt = Date.now();
   let preparedImages: Awaited<ReturnType<typeof validateAndPrepareImages>> = [];
+  logIdentifyEvent({ event: 'identify_started', requestId });
 
   try {
     const contentLength = Number(request.headers.get('content-length') ?? 0);
@@ -59,6 +61,7 @@ export async function POST(request: Request): Promise<Response> {
     }
 
     preparedImages = await validateAndPrepareImages(imageFiles);
+    logIdentifyEvent({ event: 'image_validation_completed', requestId, imageCount: preparedImages.length, latencyMs: Date.now() - startedAt });
 
     if (hasDeadlineExpired(startedAt, getTotalTimeoutMs())) {
       return Response.json(
@@ -68,13 +71,32 @@ export async function POST(request: Request): Promise<Response> {
     }
 
     const pipelineResult = await runIdentifyPipeline(preparedImages);
-    return Response.json(mapPipelineResponse(requestId, pipelineResult), { status: 200 });
+    const response = mapPipelineResponse(requestId, pipelineResult);
+    if (pipelineResult.failureStage) {
+      logIdentifyEvent({
+        event: 'stage_failed',
+        requestId,
+        stage: pipelineResult.failureStage,
+        status: pipelineResult.stages[pipelineResult.failureStage],
+        outcome: pipelineResult.failureReason,
+      });
+    }
+    if (pipelineResult.failureReason === 'RATE_LIMITED') {
+      return Response.json(
+        createErrorResponse('RATE_LIMITED', '현재 AI 요청 한도에 도달했습니다. 잠시 후 다시 시도해주세요.', requestId),
+        { status: 429 },
+      );
+    }
+    logIdentifyEvent({ event: 'identify_completed', requestId, outcome: response.status, latencyMs: Date.now() - startedAt });
+    return Response.json(response, { status: 200 });
   } catch (error) {
     if (error instanceof ImageValidationError) {
+      logIdentifyEvent({ event: 'identify_completed', requestId, outcome: 'INVALID_IMAGE', latencyMs: Date.now() - startedAt });
       return Response.json(createErrorResponse(error.code, error.message, requestId), { status: 400 });
     }
 
     if (error instanceof GeminiConfigurationError) {
+      logIdentifyEvent({ event: 'identify_completed', requestId, outcome: 'UPSTREAM_UNAVAILABLE', latencyMs: Date.now() - startedAt });
       return Response.json(
         createErrorResponse('UPSTREAM_UNAVAILABLE', 'AI 서비스 설정을 사용할 수 없습니다.', requestId),
         { status: 503 },
@@ -82,12 +104,14 @@ export async function POST(request: Request): Promise<Response> {
     }
 
     if (error instanceof ResponseMappingError) {
+      logIdentifyEvent({ event: 'identify_completed', requestId, outcome: 'VALIDATION_FAILED', latencyMs: Date.now() - startedAt });
       return Response.json(
         createErrorResponse('VALIDATION_FAILED', '결과를 검증하지 못했습니다.', requestId),
         { status: 502 },
       );
     }
 
+    logIdentifyEvent({ event: 'identify_completed', requestId, outcome: 'INTERNAL_ERROR', latencyMs: Date.now() - startedAt });
     return Response.json(
       createErrorResponse('INTERNAL_ERROR', '요청을 처리하지 못했습니다.', requestId),
       { status: 500 },

@@ -16,7 +16,7 @@ describe('POST /api/identify boundary', () => {
     expect(body.error.requestId).toMatch(/[0-9a-f-]{36}/);
   });
 
-  it('validates images before attempting the server-side Gemini pipeline', async () => {
+  it('validates images before attempting the server-side research pipeline', async () => {
     const formData = new FormData();
     formData.append('images', new File([onePixelPng], 'sample.png', { type: 'image/png' }));
 
@@ -28,9 +28,9 @@ describe('POST /api/identify boundary', () => {
     }));
     const body = await response.json();
 
-    expect(response.status).toBe(503);
-    expect(body.error.code).toBe('UPSTREAM_UNAVAILABLE');
-    expect(body.error.requestId).toBe(requestId);
+    expect(response.status).toBe(200);
+    expect(body.status).toBe('INSUFFICIENT');
+    expect(body.requestId).toBe(requestId);
   });
 
   it('rejects a file whose declared MIME type disagrees with its magic bytes', async () => {

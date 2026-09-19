@@ -8,12 +8,15 @@
 # Dependencies and build output
 node_modules/
 .next/
+.next-dev/
 *.tsbuildinfo
 infra/main.json
 infra/validation-*.bicepparam
 out/
 dist/
 coverage/
+test-results/
+playwright-report/
 
 # Logs and local tooling
 *.log

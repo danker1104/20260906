@@ -186,6 +186,9 @@ https://www.figma.com/design/D6WBUo6VTpLjLHrKOPw4g5/35-Modern-Heros-with-Gradien
 ```text
                          Result Card
                               /
+목적:
+
+* 바로 이미지 선택
                              /
 
 이 만화,                  Screenshot
@@ -268,15 +271,15 @@ Modern Heros
 
 Razer
 20%
+홈 화면에 추가하면
+SNS에서 만화를 발견했을 때
+바로 MangaFind를 실행할 수 있습니다.
 ```
 
 정리하면:
 
 ```text
 전체 Layout
-→ Piper
-
-Hero / Gradient / Mockup
 → Modern Heros
 
 Dark / Contrast / Interaction
