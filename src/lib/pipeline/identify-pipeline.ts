@@ -246,7 +246,7 @@ async function enrichKoreanInformation(
       const response = await tavily(query);
       assertDeadline(deadlineAt);
       results = uniqueBy([...results, ...response], (result) => result.url).slice(0, 20);
-      if (process.env.NODE_ENV !== 'production') console.info(`[KOREAN RESULT ${number}]`, { count: response.length, results: response });
+      if (process.env.NODE_ENV !== 'production') console.info(`[KOREAN QUERY ${number} RESULTS]`, { count: response.length, results: response });
     } catch (error) {
       if (error instanceof RequestDeadlineError) throw error;
       logProviderFailure(error);
@@ -254,11 +254,12 @@ async function enrichKoreanInformation(
     }
   };
 
-  if (japaneseTitle) await runKoreanQuery(`"${japaneseTitle}" 한국 만화`, 1);
+  if (japaneseTitle) await runKoreanQuery(`"${japaneseTitle}" 한국`, 1);
   let titleCandidates = extractTitleCandidates(results);
-  if (!hasStrongEvidence(results, titleCandidates) && japaneseTitle) {
-    const secondQuery = titleCandidates[0] ? `"${titleCandidates[0]}" 정발` : `"${japaneseTitle}" 한국 정발`;
-    await runKoreanQuery(secondQuery, 2);
+  const shouldRunSecondQuery = titleCandidates.length > 0 && !hasStrongEvidence(results, titleCandidates);
+  if (process.env.NODE_ENV !== 'production') console.info('[KOREAN QUERY 2 REQUIRED]', shouldRunSecondQuery);
+  if (shouldRunSecondQuery) {
+    await runKoreanQuery(`"${titleCandidates[0]}" 만화`, 2);
     titleCandidates = extractTitleCandidates(results);
   }
 
