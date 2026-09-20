@@ -15,6 +15,9 @@ param apimPublisherEmail string = 'admin@example.com'
 @description('APIM publisher display name.')
 param apimPublisherName string = 'MangaFind'
 
+@description('Azure Foundry model endpoint used by the server-side judge.')
+param azureFoundryEndpoint string = ''
+
 var resourceGroupName = 'rg-${environmentName}'
 
 resource resourceGroup 'Microsoft.Resources/resourceGroups@2022-09-01' = {
@@ -30,6 +33,7 @@ module resources './resources.bicep' = {
     principalId: principalId
     apimPublisherEmail: apimPublisherEmail
     apimPublisherName: apimPublisherName
+    azureFoundryEndpoint: azureFoundryEndpoint
   }
 }
 

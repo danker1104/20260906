@@ -31,8 +31,8 @@ If a requested change conflicts with a higher-priority document, identify the co
 - Node.js LTS
 - Next.js App Router and React
 - Tailwind CSS
-- Gemini API with `gemini-3.8-flash` for image analysis
-- Gemini `google_search` tool for Japanese and Korean information searches
+- Azure AI Foundry model for final candidate verification
+- Tavily and SerpApi Google Lens for Japanese and Korean information searches
 - JSON Schema or Zod validation at external boundaries
 - Docker and Azure Container Apps
 - Azure API Management for global rate limiting
@@ -47,8 +47,8 @@ The request pipeline is synchronous and must preserve this order:
 
 ```text
 Image validation
-- ① Gemini image analysis + Google Search grounding
-- ② Gemini final judgment with Japanese candidates, Korean title, publication status, and evidence
+- OCR.space + Tavily research, with SerpApi Google Lens fallback
+- Azure Foundry final judgment with Japanese candidates, Korean title, publication status, and evidence
 → Response schema validation
 → UI result
 ```
@@ -57,9 +57,9 @@ Pipeline rules:
 
 - ① extracts OCR, visual clues, search queries, and compact Google Search findings.
 - ② receives only the verified ① result and returns Japanese TOP 3, Korean title, publication status, confidence, and evidence.
-- The normal request uses exactly two Gemini calls. No automatic retry is allowed.
-- If ① is insufficient, ② is skipped and the top-level status is `INSUFFICIENT`.
-- If either call fails, times out, or fails schema validation, return `FAILED` with an empty candidate list. Never expose raw intermediate model output.
+- The normal request uses one Azure Foundry call after research. No automatic retry is allowed.
+- If research is insufficient, the Foundry call is skipped and the top-level status is `INSUFFICIENT`.
+- If the Foundry call fails, times out, or fails schema validation, return `FAILED` with an empty candidate list. Never expose raw intermediate model output.
 - Preserve candidate ranks in the final response.
 
 ## API and Type Boundaries
@@ -72,7 +72,7 @@ Pipeline rules:
 - Validate on the server using actual MIME/magic bytes and safe decoding; client validation is only for UX.
 - Treat all model and search responses as untrusted `unknown` data.
 - Validate every external response against a schema before internal use.
-- Do not pass raw Gemini responses between stages.
+- Do not pass raw Foundry responses between stages.
 - Keep `evidence` as 1-5 values from the documented `EvidenceCode` enum.
 - Use structured errors with a safe public message and `requestId`; never expose stack traces, prompts, provider error bodies, or secrets.
 
@@ -91,7 +91,7 @@ Title and publication states:
 - Stage timeout: 12 seconds for each external model stage.
 - Server automatic retries: none. A failed or timed-out stage is recorded and the user may submit a new request.
 - Global rate limit: APIM, IP-based, 3 requests/minute and 30 requests/day; return HTTP 429 with `Retry-After`.
-- Store Gemini API keys in Azure Key Vault and inject them through Managed Identity. Never put keys in source, Docker images, `.env.example`, browser bundles, logs, or chat messages.
+- Store Azure Foundry API keys in Azure Key Vault and inject them through Managed Identity. Never put keys in source, Docker images, `.env.example`, browser bundles, logs, or chat messages.
 - Keep image buffers only inside the request context and release them in a `finally` cleanup path for success, failure, timeout, and exceptions.
 - Do not persist original images, search history, or raw search content in V1.
 - Remove EXIF/IPTC/XMP metadata before model transfer.
@@ -142,7 +142,7 @@ MangaFind/
 │  └─ lib/
 │     ├─ domain/                       Shared types and status mapping
 │     ├─ pipeline/                     ①→② orchestration
-│     ├─ ai/                           Gemini adapters and prompts
+│     ├─ ai/                           Azure Foundry adapter and prompts
 │     ├─ validation/                   Image, environment, and response validation
 │     └─ observability/                Request IDs, logs, and metrics
 ├─ tests/                              Unit, integration, and contract tests
@@ -159,7 +159,7 @@ Keep HTTP orchestration in Route Handlers. Keep prompts, model adapters, busines
 
 Project-local skills are installed under `.agents/skills/`. Use them when the task matches:
 
-- `gemini-api`: Gemini API, multimodal image input, structured output, Search tools, token/caching/batch decisions. Read `.agents/skills/gemini-api/SKILL.md` before Gemini implementation.
+- `microsoft-foundry`: Azure Foundry model and agent workflows. Read the installed Foundry skill before Foundry infrastructure workflows.
 - `vercel-react-best-practices`: React/Next.js components, data fetching, bundle, hydration, or performance work. Read `.agents/skills/vercel-react-best-practices/SKILL.md` before implementation or review.
 - `web-design-guidelines`: UI accessibility, responsive behavior, forms, loading, errors, or interaction review. Read `.agents/skills/web-design-guidelines/SKILL.md` before UI review.
 - `frontend-design`: new screens, visual direction, typography, color, motion, or design-system work. Read `.agents/skills/frontend-design/SKILL.md` before design implementation.
@@ -215,14 +215,14 @@ Always:
 Ask first:
 
 - Adding authentication, a database, persistent image/result storage, queue/worker processing, or a new search provider.
-- Changing the 4-stage Gemini pipeline, model roles, timeout budget, retry policy, rate limits, or public API schema.
+- Changing the research-to-Foundry pipeline, model role, timeout budget, retry policy, rate limits, or public API schema.
 - Changing V1 source-display policy or title/publication state semantics.
 - Changing Azure APIM, Key Vault, Managed Identity, networking, or deployment scope.
 
 Never:
 
 - Commit API keys, tokens, `.env` files, or personal images.
-- Expose raw Gemini/Search output, stack traces, prompts, or secrets to users.
+- Expose raw Foundry/Search output, stack traces, prompts, or secrets to users.
 - Treat AI-generated translation as an official/common title.
 - Add a retry loop that bypasses the documented timeout/cost policy.
 - Persist user images or search history without an explicit scope decision.

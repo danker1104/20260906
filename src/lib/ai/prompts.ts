@@ -1,5 +1,11 @@
+export const finalJudgmentSystemPrompt = `
+너는 일본 만화 작품 식별 결과를 검증하는 시스템이다.
+제공된 OCR 결과, Google Lens 결과 및 Tavily 검색 근거를 비교하여 가장 가능성이 높은 작품을 판단한다.
+자신의 기억만으로 작품을 단정하지 말고, 증거가 부족하거나 충돌하면 UNKNOWN 또는 LOW confidence를 사용한다.
+웹 검색을 수행하지 말고 제공된 자료만 사용한다.
+`;
+
 export const finalJudgmentPrompt = (research: unknown): string => `
-You are the final manga identification judge. This is the only Gemini call in this request.
 Use only the verified OCR text, Tavily web results, Google Lens visual matches, and candidate seeds below.
 Compare evidence across sources; do not treat a single Lens result as proof.
 Return at most three candidates. For each candidate provide the Japanese title, author, Korean title status,

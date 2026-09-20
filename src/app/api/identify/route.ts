@@ -1,5 +1,5 @@
 import { createErrorResponse, ImageValidationError } from '../../../lib/domain/errors';
-import { GeminiConfigurationError } from '../../../lib/ai/gemini-gateway';
+import { AzureFoundryConfigurationError } from '../../../lib/ai/azure-foundry-gateway';
 import { getRequestId } from '../../../lib/observability/request-id';
 import { getTotalTimeoutMs, hasDeadlineExpired, RequestDeadlineError } from '../../../lib/pipeline/request-deadline';
 import { runIdentifyPipeline } from '../../../lib/pipeline/identify-pipeline';
@@ -95,7 +95,7 @@ export async function POST(request: Request): Promise<Response> {
       return Response.json(createErrorResponse(error.code, error.message, requestId), { status: 400 });
     }
 
-    if (error instanceof GeminiConfigurationError) {
+    if (error instanceof AzureFoundryConfigurationError) {
       logIdentifyEvent({ event: 'identify_completed', requestId, outcome: 'UPSTREAM_UNAVAILABLE', latencyMs: Date.now() - startedAt });
       return Response.json(
         createErrorResponse('UPSTREAM_UNAVAILABLE', 'AI 서비스 설정을 사용할 수 없습니다.', requestId),

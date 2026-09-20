@@ -8,8 +8,8 @@
 
 - TypeScript, Node.js, Next.js App Router, React, Tailwind CSS
 - 동기식 `POST /api/identify`
-- Gemini 이미지 분석·Google Search grounding 1회와 최종 판정 1회
-- 정상 요청당 Gemini 호출 2회 제한
+- OCR.space·Tavily·SerpApi Google Lens 연구 후 Azure Foundry 최종 판정 1회
+- 정상 요청당 Azure Foundry 호출 1회 제한
 - 단계별 timeout 12초, 전체 timeout 60초
 - 서버 자동 재시도 없음
 - 전역 rate limit: Azure API Management
@@ -26,8 +26,8 @@
 | 런타임 | Node.js LTS |
 | 웹 | Next.js App Router, React |
 | 스타일 | Tailwind CSS |
-| AI | Gemini API, `gemini-3.8-flash` for image analysis |
-| 검색 | Gemini `google_search` 도구 |
+| AI | Azure AI Foundry model inference endpoint |
+| 검색 | Tavily, SerpApi Google Lens |
 | 검증 | TypeScript 타입 + JSON Schema 또는 Zod |
 | 테스트 | TypeScript 단위·통합·계약 테스트, Playwright E2E |
 | 배포 | Docker, Azure Container Apps |
@@ -57,7 +57,7 @@ MangaFind/
 │  └─ lib/
 │     ├─ domain/                       공유 타입 및 상태 매핑
 │     ├─ pipeline/                     ①→② 오케스트레이션
-│     ├─ ai/                           Gemini 어댑터 및 프롬프트
+│     ├─ ai/                           Azure Foundry 어댑터 및 프롬프트
 │     ├─ validation/                   이미지·환경변수·응답 검증
 │     └─ observability/                requestId·로그·메트릭
 ├─ tests/                              단위·통합·계약 테스트
@@ -101,7 +101,7 @@ MangaFind V1은 Website와 PWA를 별도 애플리케이션이나 별도 AZD 서
 
 기능 구현 전 최초 배포에서는 프로세스와 컨테이너 라우팅만 검증할 수 있도록 다음 임시 동작을 허용한다.
 
-- `GET /api/health`: 외부 Gemini, Key Vault, 검색 서비스에 의존하지 않고 애플리케이션 프로세스가 요청을 처리할 수 있으면 HTTP 200을 반환한다.
+- `GET /api/health`: 외부 Foundry, Key Vault, 검색 서비스에 의존하지 않고 애플리케이션 프로세스가 요청을 처리할 수 있으면 HTTP 200을 반환한다.
 - `POST /api/identify`: AI 파이프라인 구현 전에는 HTTP 501과 임시 미구현 응답을 반환할 수 있다.
 
 스캐폴딩용 501 동작은 V1 공개 API 계약이 아니며, 식별 기능 구현 시 성공·부분 성공·오류 계약으로 교체한다. health endpoint에서 Gemini 연결이나 Secret 존재 여부를 검사하지 않는다. 외부 의존성 상태 확인은 별도 운영 진단과 메트릭으로 처리한다.
@@ -219,9 +219,9 @@ request-control
 → validateAndMapResponse
 ```
 
-각 단계는 HTTP 객체를 직접 다루지 않고 입력·출력 타입을 사용한다. 원시 Gemini 응답은 다음 단계로 직접 전달하지 않고 Schema 검증을 통과한 내부 객체로 변환한다.
+각 단계는 HTTP 객체를 직접 다루지 않고 입력·출력 타입을 사용한다. 원시 Foundry 응답은 다음 단계로 직접 전달하지 않고 Schema 검증을 통과한 내부 객체로 변환한다.
 
-### 5.1 ① 이미지 분석: Gemini 2.5 Pro
+### 5.1 ① 이미지 연구: OCR.space·Tavily·SerpApi Google Lens
 
 입력은 전처리된 이미지 1~3장이다. 출력은 다음 필드를 포함한다.
 
@@ -240,7 +240,7 @@ interface ImageAnalysisResult {
 
 이 단계는 작품을 확정하거나 최종 순위를 정하지 않는다. 단서가 없으면 `INSUFFICIENT`, 외부 오류·Schema 오류면 `FAILED`다.
 
-### 5.2 ② 최종 판정: Gemini
+### 5.2 ② 최종 판정: Azure AI Foundry
 
 ①의 검증된 OCR·단서·검색 결과 JSON을 입력으로 받는다.
 
@@ -283,7 +283,7 @@ interface ImageAnalysisResult {
 
 ### 7.3 Secret
 
-- Gemini API Key는 Azure Key Vault에 저장한다.
+- Azure Foundry API Key는 Azure Key Vault에 저장한다.
 - Container Apps Managed Identity가 Key Vault Secret 읽기 권한을 가진다.
 - Docker image, Git, 브라우저 번들, `.env.example`에는 Secret 값을 넣지 않는다.
 - 로컬 `.env.local`은 Git에서 제외한다.
@@ -330,7 +330,7 @@ Container Apps 애플리케이션은 Gateway가 전달한 요청 ID를 로그에
 
 환경변수의 기본값은 애플리케이션 deadline을 표현하며, APIM·Container Apps 설정의 복사본으로만 사용하지 않는다.
 
-정상 요청의 기본 호출 수는 Gemini 2회다. 다음 값을 계측한다.
+정상 요청의 기본 호출 수는 Azure Foundry 1회다. 다음 값을 계측한다.
 
 - 모델별 입력·출력 토큰
 - Search 사용 여부와 검색 메타데이터
@@ -367,13 +367,13 @@ Container Apps 애플리케이션은 Gateway가 전달한 요청 ID를 로그에
 
 ### 11.2 통합 테스트
 
-Gemini와 Search를 mock한다.
+Azure Foundry와 Search를 mock한다.
 
 - ①→② 모두 성공
 - ① `INSUFFICIENT` → ② `SKIPPED` → `INSUFFICIENT`
 - ① `FAILED`·`TIMEOUT` → ② `SKIPPED` → `FAILED`
 - ② timeout·검증 실패 → `FAILED`
-- 2회 호출 상한 확인
+- 1회 Foundry 호출 상한 확인
 - 이미지 검증 실패 → HTTP 400
 - APIM 429 응답 매핑
 
@@ -383,7 +383,7 @@ Gemini와 Search를 mock한다.
 - 정상 결과와 부분 성공 결과
 - `UNKNOWN` 한국 정보 표시
 - 60초 timeout 안내
-- 브라우저 번들에 Gemini Key 없음
+- 브라우저 번들에 Foundry Key 없음
 
 ## 12. Docker와 Azure
 
@@ -397,7 +397,7 @@ Gemini와 Search를 mock한다.
 - 프로젝트 루트를 build context로 사용
 - `Dockerfile`은 프로젝트 루트에 두고 Next.js standalone 또는 production start 산출물만 runtime image에 포함
 - `infra/`, 테스트 원본, `.env*`, 로컬 캐시와 원본 업로드 파일은 `.dockerignore`로 제외
-- 이미지가 빌드될 때 Gemini API 호출이나 Key Vault 접근을 수행하지 않음
+- 이미지가 빌드될 때 Foundry API 호출이나 Key Vault 접근을 수행하지 않음
 
 ### 12.2 Container Apps
 
@@ -436,7 +436,7 @@ API Management
 
 - AZD 서비스 이름과 Dockerfile 상대 경로
 - Container App 및 Container Apps Environment의 논리적 이름
-- Key Vault Secret 이름과 Managed Identity 권한 대상
+- Azure Foundry Key Vault Secret 이름과 Managed Identity 권한 대상
 - 애플리케이션이 받는 환경변수 이름
 - APIM backend와 공개 API 경로
 - infra 출력값과 서비스 간 참조 방식
@@ -448,12 +448,12 @@ API Management
 `.env.example`에는 값이 아닌 이름과 설명만 둔다.
 
 ```text
-GEMINI_API_KEY
-GEMINI_PRO_MODEL=gemini-3.8-flash
-GEMINI_FLASH_MODEL=gemini-3.8-flash
-IDENTIFY_STAGE_TIMEOUT_MS=12000
-IDENTIFY_TOTAL_TIMEOUT_MS=60000
-GEMINI_INTER_CALL_DELAY_MS=5000
+AZURE_FOUNDRY_ENDPOINT
+AZURE_FOUNDRY_API_KEY
+AZURE_FOUNDRY_MODEL
+AZURE_FOUNDRY_STAGE_TIMEOUT_MS=12000
+AI_TOTAL_TIMEOUT_MS=60000
+AI_INTER_CALL_DELAY_MS=5000
 MAX_IMAGES=3
 MAX_IMAGE_BYTES=10485760
 MAX_IMAGE_PIXELS=64000000

@@ -9,7 +9,7 @@ export class RequestDeadlineError extends Error {
 }
 
 export function getTotalTimeoutMs(): number {
-  const configuredTimeout = Number(process.env.GEMINI_TOTAL_TIMEOUT_MS ?? DEFAULT_TOTAL_TIMEOUT_MS);
+  const configuredTimeout = Number(process.env.AI_TOTAL_TIMEOUT_MS ?? DEFAULT_TOTAL_TIMEOUT_MS);
 
   if (!Number.isFinite(configuredTimeout) || configuredTimeout <= 0) {
     return DEFAULT_TOTAL_TIMEOUT_MS;
@@ -27,7 +27,7 @@ export function assertDeadline(deadlineAt: number): void {
 }
 
 export function getInterCallDelayMs(): number {
-  const configuredDelay = Number(process.env.GEMINI_INTER_CALL_DELAY_MS ?? DEFAULT_INTER_CALL_DELAY_MS);
+  const configuredDelay = Number(process.env.AI_INTER_CALL_DELAY_MS ?? DEFAULT_INTER_CALL_DELAY_MS);
   if (!Number.isFinite(configuredDelay) || configuredDelay < 0) {
     return DEFAULT_INTER_CALL_DELAY_MS;
   }

@@ -15,6 +15,9 @@ param apimPublisherEmail string
 @description('APIM publisher display name.')
 param apimPublisherName string
 
+@description('Azure Foundry model endpoint used by the server-side judge.')
+param azureFoundryEndpoint string = ''
+
 var containerRegistryName = toLower(replace('cr${environmentName}', '-', ''))
 var managedEnvironmentName = 'cae-${environmentName}'
 var containerAppName = 'ca-${environmentName}'
@@ -131,13 +134,13 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
       activeRevisionsMode: 'Single'
       secrets: [
         {
-          name: 'gemini-api-key'
-          keyVaultUrl: '${keyVault.properties.vaultUri}secrets/gemini-api-key'
+          name: 'azure-foundry-api-key'
+          keyVaultUrl: '${keyVault.properties.vaultUri}secrets/azure-foundry-api-key'
           identity: managedIdentity.id
         }
         {
-          name: 'gemini-flash-model'
-          keyVaultUrl: '${keyVault.properties.vaultUri}secrets/gemini-flash-model'
+          name: 'azure-foundry-model'
+          keyVaultUrl: '${keyVault.properties.vaultUri}secrets/azure-foundry-model'
           identity: managedIdentity.id
         }
         {
@@ -184,12 +187,16 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
               value: 'production'
             }
             {
-              name: 'GEMINI_API_KEY'
-              secretRef: 'gemini-api-key'
+              name: 'AZURE_FOUNDRY_ENDPOINT'
+              value: azureFoundryEndpoint
             }
             {
-              name: 'GEMINI_FLASH_MODEL'
-              secretRef: 'gemini-flash-model'
+              name: 'AZURE_FOUNDRY_API_KEY'
+              secretRef: 'azure-foundry-api-key'
+            }
+            {
+              name: 'AZURE_FOUNDRY_MODEL'
+              secretRef: 'azure-foundry-model'
             }
             {
               name: 'OCR_SPACE_API_KEY'

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { StageStatus, VerificationStatus } from '../domain/types';
-import type { GeminiGateway } from '../ai/gemini-gateway';
+import type { AzureFoundryGateway, AzureFoundryGenerateRequest } from '../ai/azure-foundry-gateway';
 
 export interface StageOutcome<T> {
   status: StageStatus;
@@ -50,8 +50,8 @@ function extractJson(text: string): string {
 }
 
 export async function generateJson<T>(
-  gateway: GeminiGateway,
-  request: Parameters<GeminiGateway['generateContent']>[0],
+  gateway: AzureFoundryGateway,
+  request: AzureFoundryGenerateRequest,
   schema: z.ZodType<T>,
 ): Promise<T> {
   const text = await gateway.generateContent(request);
@@ -60,12 +60,12 @@ export async function generateJson<T>(
   try {
     parsed = JSON.parse(extractJson(text));
   } catch {
-    throw new StageExecutionError('Gemini 응답이 JSON 형식이 아닙니다.', 'INVALID_MODEL_RESPONSE');
+    throw new StageExecutionError('Azure Foundry 응답이 JSON 형식이 아닙니다.', 'INVALID_MODEL_RESPONSE');
   }
 
   const result = schema.safeParse(parsed);
   if (!result.success) {
-    throw new StageExecutionError('Gemini 응답이 예상한 schema와 일치하지 않습니다.', 'INVALID_MODEL_RESPONSE');
+    throw new StageExecutionError('Azure Foundry 응답이 예상한 schema와 일치하지 않습니다.', 'INVALID_MODEL_RESPONSE');
   }
 
   return result.data;
@@ -88,7 +88,7 @@ export async function withStageTimeout<T>(operation: Promise<T>, timeoutMs: numb
 }
 
 export function getStageTimeoutMs(): number {
-  const configuredTimeout = Number(process.env.GEMINI_STAGE_TIMEOUT_MS ?? 12_000);
+  const configuredTimeout = Number(process.env.AZURE_FOUNDRY_STAGE_TIMEOUT_MS ?? 12_000);
   if (!Number.isFinite(configuredTimeout) || configuredTimeout <= 0) {
     return 12_000;
   }

@@ -32,7 +32,7 @@ function providers(overrides: Partial<ResearchProviders> = {}): ResearchProvider
 }
 
 describe('external manga research pipeline', () => {
-  it('runs one Gemini judgment after OCR and Tavily research', async () => {
+  it('runs one Foundry judgment after OCR and Tavily research', async () => {
     let judgmentCalls = 0;
     const result = await runIdentifyPipeline([preparedImage], providers({
       judge: async () => {
@@ -63,7 +63,7 @@ describe('external manga research pipeline', () => {
     expect(result.stages.imageAnalysis).toBe('SUCCESS');
   });
 
-  it('keeps Tavily Korean information when Gemini judgment is unavailable', async () => {
+  it('keeps Tavily Korean information when Foundry judgment is unavailable', async () => {
     let judgmentCalls = 0;
     const result = await runIdentifyPipeline([preparedImage], providers({
       tavily: async (query) => query.includes('한국')

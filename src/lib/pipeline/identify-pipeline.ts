@@ -1,6 +1,6 @@
 import type { Candidate, IdentifyStatus, ImageAnalysis, PreparedImage, StageStatus, VerificationStatus } from '../domain/types';
-import type { GeminiGateway } from '../ai/gemini-gateway';
-import { createGeminiGateway } from '../ai/gemini-gateway';
+import type { AzureFoundryGateway } from '../ai/azure-foundry-gateway';
+import { createAzureFoundryGateway } from '../ai/azure-foundry-gateway';
 import { finalJudgment } from './stages';
 import { isQuotaError } from './stage-utils';
 import { extractJapaneseText } from '../search/ocr-space';
@@ -200,16 +200,16 @@ async function enrichKoreanInformation(
   return { candidates: enriched, hadFailure, queries };
 }
 
-function defaultProviders(gateway?: GeminiGateway): ResearchProviders {
+function defaultProviders(gateway?: AzureFoundryGateway): ResearchProviders {
   return {
     ocr: extractJapaneseText,
     tavily: searchTavily,
     lens: searchGoogleLens,
     judge: async (bundle: ResearchBundle) => {
-      const outcome = await finalJudgment(gateway ?? createGeminiGateway(), bundle);
+      const outcome = await finalJudgment(gateway ?? createAzureFoundryGateway(), bundle);
       if (outcome.status !== 'SUCCESS' || !outcome.data) {
-        const error = new Error(outcome.failureReason === 'RATE_LIMITED' ? 'Gemini quota exceeded' : outcome.failureReason ?? 'Gemini judgment failed');
-        error.name = outcome.failureReason === 'RATE_LIMITED' ? 'GEMINI_QUOTA_ERROR' : 'GEMINI_ERROR';
+        const error = new Error(outcome.failureReason === 'RATE_LIMITED' ? 'Azure Foundry quota exceeded' : outcome.failureReason ?? 'Azure Foundry judgment failed');
+        error.name = outcome.failureReason === 'RATE_LIMITED' ? 'AZURE_FOUNDRY_QUOTA_ERROR' : 'AZURE_FOUNDRY_ERROR';
         (error as Error & { verificationStatus?: VerificationStatus }).verificationStatus = outcome.verificationStatus;
         throw error;
       }
@@ -220,7 +220,7 @@ function defaultProviders(gateway?: GeminiGateway): ResearchProviders {
 
 export async function runIdentifyPipeline(
   images: PreparedImage[],
-  providersOrGateway: ResearchProviders | GeminiGateway = defaultProviders(),
+  providersOrGateway: ResearchProviders | AzureFoundryGateway = defaultProviders(),
   deadlineAt = Date.now() + getTotalTimeoutMs(),
 ): Promise<IdentifyPipelineResult> {
   const providers = 'judge' in providersOrGateway ? providersOrGateway : defaultProviders(providersOrGateway);
