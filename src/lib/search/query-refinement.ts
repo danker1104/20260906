@@ -6,6 +6,9 @@ export interface OcrQueryRefinement {
   dialogueCandidates: string[];
   noise: string[];
   queryType: QueryType;
+  contextKeywords?: string[];
+  confidence?: number;
+  hasUsefulText?: boolean;
 }
 
 const bracketTitlePattern = /[『「【《]([^』」】》]{1,80})[』」】》]/gu;

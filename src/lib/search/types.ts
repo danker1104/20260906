@@ -1,4 +1,5 @@
 import type { PreparedImage } from '../domain/types';
+import type { OcrQueryRefinement } from './query-refinement';
 
 export type QueryType = 'TITLE' | 'DIALOGUE' | 'NONE';
 
@@ -35,5 +36,6 @@ export interface ResearchProviders {
   ocr(image: PreparedImage): Promise<OcrExtraction>;
   tavily(query: string): Promise<WebSearchResult[]>;
   lens(image: PreparedImage): Promise<LensMatch[]>;
+  refineOcr?(rawText: string): Promise<OcrQueryRefinement>;
   judge(bundle: ResearchBundle): Promise<import('../domain/types').Candidate[]>;
 }

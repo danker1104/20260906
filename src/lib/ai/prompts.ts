@@ -30,3 +30,24 @@ Return JSON only:
 Research data:
 ${JSON.stringify(research)}
 `;
+
+export const ocrRefinerSystemPrompt = `
+너는 OCR Query Refiner다. 작품을 직접 식별하지 말고 OCR 원문에서 웹 검색에 유용한 단서만 구조화한다.
+OCR에 없는 작품명을 모델 지식으로 추가하지 않는다. 웹 검색이나 검색 결과 생성을 하지 않는다.
+작품 제목처럼 보이는 문자열은 titleCandidates, 실제 대사는 dialogueCandidates로 분리한다.
+발매일·주년·광고·상품 설명은 contextKeywords 또는 noise로 분리한다.
+긴 실제 제목은 임의로 줄이지 않는다. 불확실한 후보의 confidence는 낮게 준다.
+`;
+
+export const ocrRefinerPrompt = (rawText: string): string => `
+Return JSON only with this shape:
+{
+  "titleCandidates": [{ "text": "string", "confidence": 0 }],
+  "dialogueCandidates": [{ "text": "string", "confidence": 0 }],
+  "contextKeywords": ["string"],
+  "noise": ["string"],
+  "hasUsefulText": true
+}
+Use only this OCR text:
+${rawText}
+`;

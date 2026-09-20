@@ -1,7 +1,7 @@
 import type { Candidate, IdentifyStatus, ImageAnalysis, PreparedImage, StageStatus, VerificationStatus } from '../domain/types';
 import type { AzureFoundryGateway } from '../ai/azure-foundry-gateway';
 import { createAzureFoundryGateway } from '../ai/azure-foundry-gateway';
-import { finalJudgment } from './stages';
+import { finalJudgment, refineOcrForSearch } from './stages';
 import { isQuotaError } from './stage-utils';
 import { extractJapaneseText } from '../search/ocr-space';
 import { searchTavily } from '../search/tavily';
@@ -286,6 +286,14 @@ function defaultProviders(gateway?: AzureFoundryGateway): ResearchProviders {
     ocr: extractJapaneseText,
     tavily: searchTavily,
     lens: searchGoogleLens,
+    refineOcr: async (rawText) => {
+      try {
+        return await refineOcrForSearch(gateway ?? createAzureFoundryGateway(), rawText);
+      } catch (error) {
+        if (process.env.NODE_ENV !== 'production') console.info('[FOUNDRY OCR REFINER FALLBACK]', { reason: String(error) });
+        return refineOcrQueries([rawText]);
+      }
+    },
     judge: async (bundle: ResearchBundle) => {
       if (process.env.NODE_ENV !== 'production') {
         console.info('[FOUNDRY KOREAN INPUT]', {
@@ -329,7 +337,10 @@ export async function runIdentifyPipeline(
   }));
   assertDeadline(deadlineAt);
   const ocrTexts = uniqueBy(ocrResults.filter((result) => result.valid).map((result) => result.text), (text) => text);
-  const refinement = refineOcrQueries(ocrResults.map((result) => result.rawText ?? result.text));
+  const rawOcrText = ocrResults.map((result) => result.rawText ?? result.text).filter(Boolean).join('\n');
+  const refinement = providers.refineOcr
+    ? await providers.refineOcr(rawOcrText)
+    : refineOcrQueries([rawOcrText]);
   const searchClues = refinement.queryType === 'TITLE' ? refinement.titleCandidates : refinement.dialogueCandidates;
   if (process.env.NODE_ENV !== 'production') {
     console.info('[OCR RAW]', refinement.rawText);
