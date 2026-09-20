@@ -2,8 +2,8 @@ import type { StageStatus } from '../../lib/domain/types';
 
 interface AnalysisProgressProps {
   stages: {
-    imageAnalysis: StageStatus;
-    finalJudgment: StageStatus;
+    imageAnalysis: StageStatus | 'IN_PROGRESS';
+    finalJudgment: StageStatus | 'IN_PROGRESS';
   };
 }
 
