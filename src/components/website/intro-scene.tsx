@@ -83,8 +83,9 @@ export function IntroScene() {
     html.style.overflow = 'hidden';
     window.scrollTo(0, 0);
 
-    const points = buildSphere(PARTICLE_COUNT);
-    const prevScreen: ScreenPoint[] = new Array(PARTICLE_COUNT).fill(null);
+    const particleCount = window.innerWidth < 768 ? Math.round(PARTICLE_COUNT * 0.5) : Math.round(PARTICLE_COUNT * 0.85);
+    const points = buildSphere(particleCount);
+    const prevScreen: ScreenPoint[] = new Array(particleCount).fill(null);
     const pointer = { x: 0, y: 0 };
     const pointerTarget = { x: 0, y: 0 };
     let scatter = buildScatter(1, 1);
@@ -141,6 +142,14 @@ export function IntroScene() {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'ArrowDown' || event.key === 'PageDown' || event.key === ' ') advanceZoom(220);
       if (event.key === 'ArrowUp' || event.key === 'PageUp') advanceZoom(-220);
+    };
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        if (rafId) cancelAnimationFrame(rafId);
+        rafId = 0;
+      } else if (!finished) {
+        rafId = requestAnimationFrame(draw);
+      }
     };
 
     const draw = () => {
@@ -309,6 +318,7 @@ export function IntroScene() {
     window.addEventListener('touchstart', handleTouchStart, { passive: true });
     window.addEventListener('touchmove', handleTouchMove, { passive: false });
     window.addEventListener('keydown', handleKeyDown);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
     rafId = requestAnimationFrame(draw);
 
     return () => {
@@ -319,6 +329,7 @@ export function IntroScene() {
       window.removeEventListener('touchstart', handleTouchStart);
       window.removeEventListener('touchmove', handleTouchMove);
       window.removeEventListener('keydown', handleKeyDown);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
       if (!finished) html.style.overflow = previousOverflow;
     };
   }, [enabled, done]);
@@ -328,6 +339,7 @@ export function IntroScene() {
   return (
     <div className="intro-scene" role="region" aria-label="휠을 돌려 확대해 홈페이지로 진입하는 소개 화면">
       <canvas className="intro-canvas" ref={canvasRef} />
+      <p className="intro-hint">스크롤하거나 위로 쓸어넘겨 홈페이지로 들어가세요</p>
       <button type="button" className="intro-skip" onClick={() => setDone(true)}>
         건너뛰기
       </button>
