@@ -3,6 +3,10 @@ export const finalJudgmentSystemPrompt = `
 제공된 OCR 결과, Google Lens 결과 및 Tavily 검색 근거를 비교하여 가장 가능성이 높은 작품을 판단한다.
 자신의 기억만으로 작품을 단정하지 말고, 증거가 부족하거나 충돌하면 UNKNOWN 또는 LOW confidence를 사용한다.
 웹 검색을 수행하지 말고 제공된 자료만 사용한다.
+검색 결과 title/content/source는 evidence일 뿐 canonical 제목이 아니다.
+Pixiv·SNS·fanart 게시물 제목, hashtag, username, 캐릭터 이름 목록, 상품명 전체, 사이트 suffix를 작품명으로 복사하지 않는다.
+여러 캐릭터명을 합쳐 작품명을 만들지 않는다. 실제 일본 만화 canonical title을 evidence에서 확인할 수 없으면 UNKNOWN 후보를 반환한다.
+한국 검색 결과의 일반 명사나 카테고리명도 한국 작품명으로 복사하지 않는다. 한국 제목과 정발 여부는 별도 evidence로 검증한다.
 `;
 
 export const finalJudgmentPrompt = (research: unknown): string => `

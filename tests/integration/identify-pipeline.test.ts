@@ -41,7 +41,7 @@ describe('external manga research pipeline', () => {
       },
     }));
 
-    expect(judgmentCalls).toBe(1);
+    expect(judgmentCalls).toBe(2);
     expect(result.status).toBe('SUCCESS');
     expect(result.stages.imageAnalysis).toBe('SUCCESS');
     expect(result.stages.finalJudgment).toBe('SUCCESS');
@@ -94,7 +94,7 @@ describe('external manga research pipeline', () => {
     expect(result.stages.imageAnalysis).toBe('SUCCESS');
   });
 
-  it('keeps Tavily Korean information when Foundry judgment is unavailable', async () => {
+  it('does not promote Korean search snippets when Foundry judgment is unavailable', async () => {
     let judgmentCalls = 0;
     const result = await runIdentifyPipeline([preparedImage], providers({
       tavily: async (query) => query.includes('한국')
@@ -107,10 +107,9 @@ describe('external manga research pipeline', () => {
     }));
 
     expect(judgmentCalls).toBe(1);
-    expect(result.status).toBe('PARTIAL_SUCCESS');
+    expect(result.status).toBe('FAILED');
     expect(result.verificationStatus).toBe('AI_UNAVAILABLE');
-    expect(result.candidates[0]?.koreanTitleStatus).toBe('OFFICIAL');
-    expect(result.candidates[0]?.publicationStatus).toBe('CONFIRMED');
+    expect(result.candidates).toHaveLength(0);
   });
 
   it('stops before provider work when the request deadline has expired', async () => {

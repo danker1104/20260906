@@ -85,7 +85,7 @@ describe('external manga research pipeline', () => {
     const result = await runIdentifyPipeline([preparedImage], providers);
 
     expect(lensCalls).toBe(0);
-    expect(judgmentCalls).toBe(1);
+    expect(judgmentCalls).toBe(2);
     expect(result.status).toBe('SUCCESS');
     expect(result.stages.finalJudgment).toBe('SUCCESS');
     expect(result.candidates[0]?.japaneseTitle).toBe('作品名');

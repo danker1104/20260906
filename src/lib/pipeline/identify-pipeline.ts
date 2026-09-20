@@ -266,17 +266,13 @@ async function enrichKoreanInformation(
   }
 
   const koreanTitleCandidate = titleCandidates[0] ?? null;
-  const strongEvidence = hasStrongEvidence(results, titleCandidates);
   if (process.env.NODE_ENV !== 'production') {
     console.info('[KOREAN TITLE CANDIDATE]', { candidate: koreanTitleCandidate });
     console.info('[KOREAN EVIDENCE]', { evidenceCount: results.length, results });
   }
   const enriched = candidates.map((candidate) => ({
     ...candidate,
-    koreanTitle: candidate.rank === 1 ? koreanTitleCandidate : candidate.koreanTitle,
-    koreanTitleStatus: candidate.rank === 1 && koreanTitleCandidate && strongEvidence ? 'OFFICIAL' as const : candidate.koreanTitleStatus,
-    publicationStatus: candidate.rank === 1 && strongEvidence ? 'CONFIRMED' as const : candidate.publicationStatus,
-    koreanInvestigationStatus: koreanTitleCandidate ? 'SUCCESS' as const : 'INSUFFICIENT' as const,
+    koreanInvestigationStatus: results.length > 0 ? 'SUCCESS' as const : 'INSUFFICIENT' as const,
   }));
   return { candidates: enriched, hadFailure, queries, results, titleCandidates };
 }
@@ -392,38 +388,58 @@ export async function runIdentifyPipeline(
     };
   }
 
-  const korean = await enrichKoreanInformation(fallbackCandidates(seeds), providers.tavily, deadlineAt);
-  analysis.searchQueries.korean = korean.queries;
   const research: ResearchBundle = {
     ocrTexts,
     tavilyResults: uniqueTavilyResults,
     lensMatches,
     candidateSeeds: seeds,
-    koreanResults: korean.results,
-    koreanTitleCandidates: korean.titleCandidates,
   };
   assertDeadline(deadlineAt);
-  let judgedCandidates: Candidate[];
+  let canonicalCandidates: Candidate[];
   try {
-    judgedCandidates = normalizeCandidates(await providers.judge(research));
+    canonicalCandidates = normalizeCandidates(await providers.judge(research));
     assertDeadline(deadlineAt);
   } catch (error) {
     if (error instanceof RequestDeadlineError) throw error;
-    const fallback = selectSingleCandidate(korean.candidates);
+    const fallback = selectSingleCandidate(fallbackCandidates(refinement.titleCandidates));
     if (fallback.length === 0) {
       return { status: 'FAILED', stages: { imageAnalysis: 'SUCCESS', finalJudgment: 'FAILED' }, candidates: [], analysis, verificationStatus: getVerificationStatus(error), failureStage: 'finalJudgment', failureReason: isQuotaError(error) ? 'RATE_LIMITED' : 'UPSTREAM_ERROR' };
     }
     return { status: 'PARTIAL_SUCCESS', stages: { imageAnalysis: 'SUCCESS', finalJudgment: 'FAILED' }, candidates: fallback, analysis, verificationStatus: getVerificationStatus(error), failureStage: 'finalJudgment', failureReason: isQuotaError(error) ? 'RATE_LIMITED' : 'UPSTREAM_ERROR' };
   }
 
-  if (judgedCandidates.length === 0) {
+  if (canonicalCandidates.length === 0) {
     return { status: 'INSUFFICIENT', stages: { imageAnalysis: 'SUCCESS', finalJudgment: 'INSUFFICIENT' }, candidates: [], analysis };
+  }
+
+  const korean = await enrichKoreanInformation(canonicalCandidates, providers.tavily, deadlineAt);
+  analysis.searchQueries.korean = korean.queries;
+  const verifiedResearch: ResearchBundle = {
+    ...research,
+    koreanResults: korean.results,
+    koreanTitleCandidates: korean.titleCandidates,
+  };
+  let judgedCandidates: Candidate[];
+  try {
+    judgedCandidates = normalizeCandidates(await providers.judge(verifiedResearch));
+    assertDeadline(deadlineAt);
+  } catch (error) {
+    if (error instanceof RequestDeadlineError) throw error;
+    return {
+      status: 'PARTIAL_SUCCESS',
+      stages: { imageAnalysis: 'SUCCESS', finalJudgment: 'FAILED' },
+      candidates: selectSingleCandidate(canonicalCandidates),
+      analysis,
+      verificationStatus: getVerificationStatus(error),
+      failureStage: 'finalJudgment',
+      failureReason: isQuotaError(error) ? 'RATE_LIMITED' : 'UPSTREAM_ERROR',
+    };
   }
 
   return {
     status: korean.hadFailure ? 'PARTIAL_SUCCESS' : 'SUCCESS',
     stages: { imageAnalysis: 'SUCCESS', finalJudgment: 'SUCCESS' },
-    candidates: selectSingleCandidate(judgedCandidates, korean.candidates),
+    candidates: selectSingleCandidate(judgedCandidates),
     analysis,
     ...(korean.hadFailure ? { failureStage: 'finalJudgment' as const, failureReason: 'UPSTREAM_ERROR' as const } : {}),
   };
