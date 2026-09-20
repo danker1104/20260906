@@ -11,11 +11,17 @@ const steps = [
   { number: '03', title: '한국 정보를 확인해요', text: '일본 원제, 발음, 한국어 제목과 정발 여부를 보여드려요.' },
 ];
 
-export default function WebsiteHomePage() {
+export default async function WebsiteHomePage({
+  searchParams,
+}: {
+  searchParams: Promise<{ skipIntro?: string }>;
+}) {
+  const shouldSkipIntro = (await searchParams).skipIntro === '1';
+
   return (
     <main className="site-shell">
       <a className="skip-link" href="#site-title">본문으로 건너뛰기</a>
-      <IntroScene />
+      {!shouldSkipIntro && <IntroScene />}
       <header className="site-nav">
         <Link className="brand" href="/">MangaFind</Link>
         <nav aria-label="주요 메뉴"><a href="#how-it-works">찾는 방법</a><a href="#result-example">결과 예시</a><InstallPrompt className="nav-cta" label="설치하기" /></nav>
