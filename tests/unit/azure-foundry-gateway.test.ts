@@ -40,6 +40,9 @@ describe('Azure Foundry gateway', () => {
   });
 
   it('fails closed when server-side Foundry configuration is missing', () => {
+    vi.stubEnv('AZURE_FOUNDRY_ENDPOINT', '');
+    vi.stubEnv('AZURE_FOUNDRY_API_KEY', '');
+    vi.stubEnv('AZURE_FOUNDRY_MODEL', '');
     expect(() => createAzureFoundryGateway()).toThrow(AzureFoundryConfigurationError);
   });
 });

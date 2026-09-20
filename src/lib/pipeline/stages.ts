@@ -17,6 +17,52 @@ const ocrRefinerSchema = z.object({
   hasUsefulText: z.boolean(),
 });
 
+function normalizeKoreanVerifierResponse(value: unknown): unknown {
+  if (!value || typeof value !== 'object' || !Array.isArray((value as { candidates?: unknown }).candidates)) return value;
+
+  const candidates = (value as { candidates: unknown[] }).candidates;
+  const evidenceCounts = candidates.map((candidate) => (
+    candidate && typeof candidate === 'object' && Array.isArray((candidate as { evidence?: unknown }).evidence)
+      ? (candidate as { evidence: unknown[] }).evidence.length
+      : null
+  ));
+  if (process.env.NODE_ENV !== 'production') console.info('[FOUNDRY EVIDENCE COUNT BEFORE NORMALIZE]', evidenceCounts);
+
+  const normalized = {
+    ...(value as Record<string, unknown>),
+    candidates: candidates.map((candidate) => {
+      if (!candidate || typeof candidate !== 'object' || !Array.isArray((candidate as { evidence?: unknown }).evidence)) return candidate;
+      return {
+        ...(candidate as Record<string, unknown>),
+        evidence: (candidate as { evidence: unknown[] }).evidence.slice(0, 5),
+      };
+    }),
+  };
+  if (process.env.NODE_ENV !== 'production') console.info('[FOUNDRY EVIDENCE COUNT AFTER NORMALIZE]', (normalized.candidates as Array<{ evidence?: unknown[] }>).map((candidate) => candidate.evidence?.length ?? null));
+  return normalized;
+}
+
+function normalizeTitle(value: string): string {
+  return value.replace(/\s+/gu, '').toLocaleLowerCase();
+}
+
+function applyKoreanTitleEvidence(candidates: Candidate[], research: ResearchBundle): Candidate[] {
+  const officialTitles = research.koreanOfficialTitleCandidates ?? [];
+  const commonTitles = research.koreanCommonTitleCandidates ?? [];
+  return candidates.map((candidate) => {
+    const officialTitle = officialTitles.find((title) => normalizeTitle(title) === normalizeTitle(candidate.koreanTitle ?? ''));
+    const commonTitle = commonTitles.find((title) => normalizeTitle(title) === normalizeTitle(candidate.koreanTitle ?? ''));
+    if (officialTitle) return { ...candidate, koreanTitle: officialTitle, koreanTitleStatus: 'OFFICIAL' as const };
+    if (commonTitle) return { ...candidate, koreanTitle: commonTitle, koreanTitleStatus: 'COMMON' as const, publicationStatus: officialTitles.length === 0 && candidate.publicationStatus === 'CONFIRMED' ? 'UNKNOWN' as const : candidate.publicationStatus };
+    if (candidate.koreanTitleStatus === 'OFFICIAL' || candidate.koreanTitleStatus === 'COMMON') {
+      return { ...candidate, koreanTitleStatus: candidate.koreanTitle ? 'TRANSLATED' as const : 'UNKNOWN' as const, publicationStatus: officialTitles.length === 0 ? 'UNKNOWN' as const : candidate.publicationStatus };
+    }
+    return officialTitles.length === 0 && candidate.publicationStatus === 'CONFIRMED'
+      ? { ...candidate, publicationStatus: 'UNKNOWN' as const }
+      : candidate;
+  });
+}
+
 export async function refineOcrForSearch(gateway: AzureFoundryGateway, rawText: string): Promise<OcrQueryRefinement> {
   const result = await withStageTimeout(
     generateJson(gateway, {
@@ -38,10 +84,23 @@ async function generateJudgment(
   research: ResearchBundle,
 ): Promise<Candidate[]> {
   const result = await withStageTimeout(
-    generateJson(gateway, { model, systemPrompt: finalJudgmentSystemPrompt, userPrompt: finalJudgmentPrompt(research) }, finalJudgmentSchema),
+    generateJson(
+      gateway,
+      { model, systemPrompt: finalJudgmentSystemPrompt, userPrompt: finalJudgmentPrompt(research) },
+      finalJudgmentSchema,
+      research.koreanResults ? 'FOUNDRY KOREAN' : undefined,
+      research.koreanResults ? normalizeKoreanVerifierResponse : undefined,
+    ),
     getStageTimeoutMs(),
   );
-  return result.candidates;
+  const candidates = research.koreanResults ? applyKoreanTitleEvidence(result.candidates, research) : result.candidates;
+  if (research.koreanResults && process.env.NODE_ENV !== 'production') {
+    console.info('[FOUNDRY KOREAN RESULT]', result.candidates[0] ?? null);
+    console.info('[KOREAN TITLE STATUS]', candidates[0]?.koreanTitleStatus ?? 'UNKNOWN');
+    console.info('[FINAL KOREAN TITLE]', candidates[0]?.koreanTitle ?? null);
+    console.info('[KOREAN FINAL RESULT]', candidates[0] ?? null);
+  }
+  return candidates;
 }
 
 export async function finalJudgment(

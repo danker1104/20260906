@@ -196,6 +196,15 @@ function selectSingleCandidate(candidates: Candidate[], koreanCandidates: Candid
   }];
 }
 
+function preserveKoreanInvestigationStatus(candidates: Candidate[], investigatedCandidates: Candidate[]): Candidate[] {
+  return candidates.map((candidate) => {
+    const investigated = investigatedCandidates.find((item) => (
+      cleanJapaneseTitle(item.japaneseTitle) === cleanJapaneseTitle(candidate.japaneseTitle)
+    ));
+    return investigated ? { ...candidate, koreanInvestigationStatus: investigated.koreanInvestigationStatus } : candidate;
+  });
+}
+
 function extractJapaneseTitle(value: string): string {
   const parts = value.match(/[\u3040-\u30ff\u3400-\u9fff][\u3040-\u30ff\u3400-\u9fff\s・「」『』]{1,}/gu) ?? [];
   return parts.join(' ').replace(/[「」『』]/gu, '').replace(/\s+/gu, ' ').trim().slice(0, 80);
@@ -205,12 +214,15 @@ async function enrichKoreanInformation(
   candidates: Candidate[],
   tavily: ResearchProviders['tavily'],
   deadlineAt = Date.now() + getTotalTimeoutMs(),
-): Promise<{ candidates: Candidate[]; hadFailure: boolean; queries: string[]; results: WebSearchResult[]; titleCandidates: string[] }> {
+): Promise<{ candidates: Candidate[]; hadFailure: boolean; queries: string[]; results: WebSearchResult[]; titleCandidates: string[]; official: string[]; common: string[] }> {
   const japaneseTitle = extractJapaneseTitle(candidates[0]?.japaneseTitle ?? '');
   const queries: string[] = [];
   let hadFailure = false;
   let results: WebSearchResult[] = [];
-  if (process.env.NODE_ENV !== 'production') console.info('[KOREAN SEARCH START]', { japaneseTitle });
+  if (process.env.NODE_ENV !== 'production') {
+    console.info('[CANONICAL JAPANESE TITLE]', japaneseTitle);
+    console.info('[KOREAN INVESTIGATION START]', { japaneseTitle });
+  }
 
   const extractTitleCandidates = (items: WebSearchResult[]): string[] => {
     const counts = new Map<string, number>();
@@ -230,6 +242,32 @@ async function enrichKoreanInformation(
     return [...counts.entries()].sort((left, right) => right[1] - left[1]).map(([candidate]) => candidate).slice(0, 5);
   };
 
+  const titleEvidence = (items: WebSearchResult[]) => {
+    const evidence = new Map<string, { count: number; domains: Set<string>; official: boolean }>();
+    for (const item of items) {
+      let domain = item.url;
+      try { domain = new URL(item.url).hostname.replace(/^www\./u, ''); } catch { /* keep the URL as a stable source key */ }
+      const haystack = `${item.title} ${item.content}`;
+      const official = /정발|정식(?:출판|발매)|정식 한국어판|한국어판|한국판|국내 출판|번역 출간/u.test(haystack)
+        || /kyobobook|yes24|aladin|ridibooks|ridi\.|series\.naver|page\.kakao|publisher|출판사/u.test(item.url.toLowerCase());
+      const matches = haystack.match(/[가-힣][가-힣0-9·&'’' -]{1,}/gu) ?? [];
+      for (const match of matches) {
+        const candidate = match.replace(/\s+(?:\d+권?|한국어판|만화책|eBook|전자책|단행본|세트|정발|공식|판매|출간|출판)+\s*$/giu, '').replace(/\s+/gu, ' ').trim();
+        if (candidate.length < 3 || /^(공식|판매|정발|출판|출간|한국어|제목|만화|만화책|도서|전자책|eBook)$/u.test(candidate)) continue;
+        const current = evidence.get(candidate) ?? { count: 0, domains: new Set<string>(), official: false };
+        current.count += 1;
+        current.domains.add(domain);
+        current.official ||= official;
+        evidence.set(candidate, current);
+      }
+    }
+    const ranked = [...evidence.entries()].sort((left, right) => right[1].domains.size - left[1].domains.size || right[1].count - left[1].count);
+    return {
+      official: ranked.filter(([, value]) => value.official).map(([candidate]) => candidate).slice(0, 5),
+      common: ranked.filter(([, value]) => value.domains.size >= 2 && !value.official).map(([candidate]) => candidate).slice(0, 5),
+    };
+  };
+
   const hasStrongEvidence = (items: WebSearchResult[], titleCandidates: string[]) => items.some((item) => {
     const haystack = `${item.title} ${item.content}`;
     const source = item.url.toLowerCase();
@@ -242,13 +280,13 @@ async function enrichKoreanInformation(
 
   const runKoreanQuery = async (query: string, number: 1 | 2) => {
     queries.push(query);
-    if (process.env.NODE_ENV !== 'production') console.info(`[KOREAN QUERY ${number}]`, { query });
+    if (process.env.NODE_ENV !== 'production') console.info('[KOREAN SEARCH QUERY]', { number, query });
     assertDeadline(deadlineAt);
     try {
       const response = await tavily(query);
       assertDeadline(deadlineAt);
       results = uniqueBy([...results, ...response], (result) => result.url).slice(0, 20);
-      if (process.env.NODE_ENV !== 'production') console.info(`[KOREAN QUERY ${number} RESULTS]`, { count: response.length, results: response });
+      if (process.env.NODE_ENV !== 'production') console.info('[KOREAN TAVILY RAW RESULTS]', { count: response.length, results: response });
     } catch (error) {
       if (error instanceof RequestDeadlineError) throw error;
       logProviderFailure(error);
@@ -266,15 +304,20 @@ async function enrichKoreanInformation(
   }
 
   const koreanTitleCandidate = titleCandidates[0] ?? null;
+  const classifiedTitles = titleEvidence(results);
   if (process.env.NODE_ENV !== 'production') {
     console.info('[KOREAN TITLE CANDIDATE]', { candidate: koreanTitleCandidate });
     console.info('[KOREAN EVIDENCE]', { evidenceCount: results.length, results });
+    console.info('[KOREAN SEARCH RAW RESULTS]', results);
+    console.info('[OFFICIAL TITLE CANDIDATES]', classifiedTitles.official);
+    console.info('[COMMON TITLE CANDIDATES]', classifiedTitles.common);
+    console.info('[COMMON TITLE EVIDENCE]', { candidates: classifiedTitles.common, sourceCount: results.length });
   }
   const enriched = candidates.map((candidate) => ({
     ...candidate,
     koreanInvestigationStatus: results.length > 0 ? 'SUCCESS' as const : 'INSUFFICIENT' as const,
   }));
-  return { candidates: enriched, hadFailure, queries, results, titleCandidates };
+  return { candidates: enriched, hadFailure, queries, results, titleCandidates, ...classifiedTitles };
 }
 
 function defaultProviders(gateway?: AzureFoundryGateway): ResearchProviders {
@@ -396,16 +439,20 @@ export async function runIdentifyPipeline(
   };
   assertDeadline(deadlineAt);
   let canonicalCandidates: Candidate[];
+  let canonicalFailure: unknown;
   try {
     canonicalCandidates = normalizeCandidates(await providers.judge(research));
     assertDeadline(deadlineAt);
+    if (process.env.NODE_ENV !== 'production') console.info('[CANONICAL JAPANESE TITLE]', canonicalCandidates[0]?.japaneseTitle ?? null);
   } catch (error) {
     if (error instanceof RequestDeadlineError) throw error;
     const fallback = selectSingleCandidate(fallbackCandidates(refinement.titleCandidates));
     if (fallback.length === 0) {
       return { status: 'FAILED', stages: { imageAnalysis: 'SUCCESS', finalJudgment: 'FAILED' }, candidates: [], analysis, verificationStatus: getVerificationStatus(error), failureStage: 'finalJudgment', failureReason: isQuotaError(error) ? 'RATE_LIMITED' : 'UPSTREAM_ERROR' };
     }
-    return { status: 'PARTIAL_SUCCESS', stages: { imageAnalysis: 'SUCCESS', finalJudgment: 'FAILED' }, candidates: fallback, analysis, verificationStatus: getVerificationStatus(error), failureStage: 'finalJudgment', failureReason: isQuotaError(error) ? 'RATE_LIMITED' : 'UPSTREAM_ERROR' };
+    canonicalCandidates = fallback;
+    canonicalFailure = error;
+    if (process.env.NODE_ENV !== 'production') console.info('[CANONICAL JAPANESE TITLE]', canonicalCandidates[0]?.japaneseTitle ?? null);
   }
 
   if (canonicalCandidates.length === 0) {
@@ -418,7 +465,18 @@ export async function runIdentifyPipeline(
     ...research,
     koreanResults: korean.results,
     koreanTitleCandidates: korean.titleCandidates,
+    koreanOfficialTitleCandidates: korean.official,
+    koreanCommonTitleCandidates: korean.common,
   };
+  if (process.env.NODE_ENV !== 'production') {
+    console.info('[KOREAN FOUNDRY INPUT]', {
+      titleCandidate: verifiedResearch.koreanTitleCandidates?.[0] ?? null,
+      evidenceCount: verifiedResearch.koreanResults?.length ?? 0,
+      evidence: verifiedResearch.koreanResults ?? [],
+      officialTitleCandidates: verifiedResearch.koreanOfficialTitleCandidates ?? [],
+      commonTitleCandidates: verifiedResearch.koreanCommonTitleCandidates ?? [],
+    });
+  }
   let judgedCandidates: Candidate[];
   try {
     judgedCandidates = normalizeCandidates(await providers.judge(verifiedResearch));
@@ -428,7 +486,7 @@ export async function runIdentifyPipeline(
     return {
       status: 'PARTIAL_SUCCESS',
       stages: { imageAnalysis: 'SUCCESS', finalJudgment: 'FAILED' },
-      candidates: selectSingleCandidate(canonicalCandidates),
+      candidates: selectSingleCandidate(korean.candidates),
       analysis,
       verificationStatus: getVerificationStatus(error),
       failureStage: 'finalJudgment',
@@ -437,10 +495,10 @@ export async function runIdentifyPipeline(
   }
 
   return {
-    status: korean.hadFailure ? 'PARTIAL_SUCCESS' : 'SUCCESS',
+    status: canonicalFailure || korean.hadFailure ? 'PARTIAL_SUCCESS' : 'SUCCESS',
     stages: { imageAnalysis: 'SUCCESS', finalJudgment: 'SUCCESS' },
-    candidates: selectSingleCandidate(judgedCandidates),
+    candidates: selectSingleCandidate(preserveKoreanInvestigationStatus(judgedCandidates, korean.candidates)),
     analysis,
-    ...(korean.hadFailure ? { failureStage: 'finalJudgment' as const, failureReason: 'UPSTREAM_ERROR' as const } : {}),
+    ...(canonicalFailure || korean.hadFailure ? { failureStage: 'finalJudgment' as const, failureReason: 'UPSTREAM_ERROR' as const } : {}),
   };
 }

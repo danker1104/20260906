@@ -30,6 +30,8 @@ export interface ResearchBundle {
   candidateSeeds: string[];
   koreanResults?: WebSearchResult[];
   koreanTitleCandidates?: string[];
+  koreanOfficialTitleCandidates?: string[];
+  koreanCommonTitleCandidates?: string[];
 }
 
 export interface ResearchProviders {

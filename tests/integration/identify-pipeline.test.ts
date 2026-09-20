@@ -112,6 +112,42 @@ describe('external manga research pipeline', () => {
     expect(result.candidates).toHaveLength(0);
   });
 
+  it('marks Korean investigation as attempted when the verifier fails after Korean search', async () => {
+    let judgmentCalls = 0;
+    const result = await runIdentifyPipeline([preparedImage], providers({
+      judge: async () => {
+        judgmentCalls += 1;
+        if (judgmentCalls === 1) return [{ ...candidate, koreanTitle: null, koreanTitleStatus: 'UNKNOWN' as const, publicationStatus: 'UNKNOWN' as const, koreanInvestigationStatus: 'SKIPPED' as const }];
+        throw Object.assign(new Error('invalid verifier response'), { status: 502 });
+      },
+    }));
+
+    expect(judgmentCalls).toBe(2);
+    expect(result.status).toBe('PARTIAL_SUCCESS');
+    expect(result.candidates[0]?.koreanInvestigationStatus).toBe('SUCCESS');
+    expect(result.candidates[0]?.koreanTitleStatus).toBe('UNKNOWN');
+  });
+
+  it('continues Korean investigation when canonical title comes from OCR fallback', async () => {
+    let judgmentCalls = 0;
+    const koreanQueries: string[] = [];
+    const result = await runIdentifyPipeline([preparedImage], providers({
+      refineOcr: async (rawText) => ({ rawText, titleCandidates: ['作品名'], dialogueCandidates: [], noise: [], queryType: 'TITLE' }),
+      tavily: async (query) => {
+        koreanQueries.push(query);
+        return [{ title: '作品名 한국어판', url: 'https://example.com/work', content: '작품명 정발', score: 0.9 }];
+      },
+      judge: async () => {
+        judgmentCalls += 1;
+        throw Object.assign(new Error('canonical unavailable'), { status: 503 });
+      },
+    }));
+
+    expect(judgmentCalls).toBe(2);
+    expect(koreanQueries).toContain('"作品名" 한국');
+    expect(result.candidates[0]?.koreanInvestigationStatus).toBe('SUCCESS');
+  });
+
   it('stops before provider work when the request deadline has expired', async () => {
     let ocrCalls = 0;
     await expect(runIdentifyPipeline([preparedImage], providers({

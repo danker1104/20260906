@@ -53,8 +53,11 @@ export async function generateJson<T>(
   gateway: AzureFoundryGateway,
   request: AzureFoundryGenerateRequest,
   schema: z.ZodType<T>,
+  debugLabel?: string,
+  normalize?: (value: unknown) => unknown,
 ): Promise<T> {
   const text = await gateway.generateContent(request);
+  if (debugLabel && process.env.NODE_ENV !== 'production') console.info(`[${debugLabel} RAW RESPONSE]`, text);
   let parsed: unknown;
 
   try {
@@ -63,10 +66,13 @@ export async function generateJson<T>(
     throw new StageExecutionError('Azure Foundry 응답이 JSON 형식이 아닙니다.', 'INVALID_MODEL_RESPONSE');
   }
 
-  const result = schema.safeParse(parsed);
+  const normalized = normalize ? normalize(parsed) : parsed;
+  const result = schema.safeParse(normalized);
   if (!result.success) {
     throw new StageExecutionError('Azure Foundry 응답이 예상한 schema와 일치하지 않습니다.', 'INVALID_MODEL_RESPONSE');
   }
+
+  if (debugLabel && process.env.NODE_ENV !== 'production') console.info(`[${debugLabel} PARSED RESULT]`, result.data);
 
   return result.data;
 }
