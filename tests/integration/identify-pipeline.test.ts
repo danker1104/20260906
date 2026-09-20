@@ -48,6 +48,37 @@ describe('external manga research pipeline', () => {
     expect(result.analysis?.ocr).toContain('作品名 漫画');
   });
 
+  it('returns one candidate and prioritizes the candidate with Korean information', async () => {
+    const secondaryCandidate = { ...candidate, rank: 2 as const, japaneseTitle: '다른 작품' };
+    const result = await runIdentifyPipeline([preparedImage], providers({
+      judge: async () => [
+        { ...candidate, rank: 1 as const, koreanTitle: null, koreanTitleStatus: 'UNKNOWN' as const, publicationStatus: 'UNKNOWN' as const },
+        secondaryCandidate,
+      ],
+    }));
+
+    expect(result.candidates).toHaveLength(1);
+    expect(result.candidates[0]?.japaneseTitle).toBe('다른 작품');
+    expect(result.candidates[0]?.rank).toBe(1);
+  });
+
+  it('keeps only the clean Japanese title when Korean information is unavailable', async () => {
+    const result = await runIdentifyPipeline([preparedImage], providers({
+      tavily: async () => [{ title: '作品名 漫画', url: 'https://example.com/jp', content: '作品名 漫画', score: 0.9 }],
+      judge: async () => [{
+        ...candidate,
+        japaneseTitle: '葬送のフリーレン 第12話',
+        koreanTitle: null,
+        koreanTitleStatus: 'UNKNOWN' as const,
+        publicationStatus: 'UNKNOWN' as const,
+      }],
+    }));
+
+    expect(result.candidates).toHaveLength(1);
+    expect(result.candidates[0]?.japaneseTitle).toBe('葬送のフリーレン');
+    expect(result.candidates[0]?.koreanTitleStatus).toBe('UNKNOWN');
+  });
+
   it('uses Lens only when OCR is not useful', async () => {
     let lensCalls = 0;
     const result = await runIdentifyPipeline([preparedImage], providers({

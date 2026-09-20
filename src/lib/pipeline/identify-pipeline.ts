@@ -158,6 +158,42 @@ function normalizeCandidates(candidates: Candidate[]): Candidate[] {
   return candidates.slice(0, 3).map((candidate, index) => ({ ...candidate, rank: (index + 1) as 1 | 2 | 3 }));
 }
 
+function cleanJapaneseTitle(value: string): string {
+  return value
+    .replace(/\s*(?:第\s*\d+\s*(?:話|巻|章)|\d+\s*(?:話|巻)|(?:episode|chapter|vol(?:ume)?|ep)\s*[-.]?\s*\d+).*$/iu, '')
+    .replace(/\s*[|｜].*$/u, '')
+    .replace(/\s+/gu, ' ')
+    .trim();
+}
+
+function hasKoreanInformation(candidate: Candidate): boolean {
+  return Boolean(candidate.koreanTitle && candidate.koreanTitleStatus !== 'UNKNOWN');
+}
+
+function selectSingleCandidate(candidates: Candidate[], koreanCandidates: Candidate[] = []): Candidate[] {
+  const enriched = candidates.map((candidate) => {
+    if (hasKoreanInformation(candidate)) return candidate;
+    const matchingKorean = koreanCandidates.find((koreanCandidate) => (
+      hasKoreanInformation(koreanCandidate)
+      && cleanJapaneseTitle(koreanCandidate.japaneseTitle) === cleanJapaneseTitle(candidate.japaneseTitle)
+    ));
+    return matchingKorean ? {
+      ...candidate,
+      koreanTitle: matchingKorean.koreanTitle,
+      koreanTitleStatus: matchingKorean.koreanTitleStatus,
+      publicationStatus: matchingKorean.publicationStatus,
+      koreanInvestigationStatus: matchingKorean.koreanInvestigationStatus,
+    } : candidate;
+  });
+  const selected = enriched.find(hasKoreanInformation) ?? enriched[0];
+  if (!selected) return [];
+  return [{
+    ...selected,
+    rank: 1,
+    japaneseTitle: cleanJapaneseTitle(selected.japaneseTitle),
+  }];
+}
+
 function extractJapaneseTitle(value: string): string {
   const parts = value.match(/[\u3040-\u30ff\u3400-\u9fff][\u3040-\u30ff\u3400-\u9fff\s・「」『』]{1,}/gu) ?? [];
   return parts.join(' ').replace(/[「」『』]/gu, '').replace(/\s+/gu, ' ').trim().slice(0, 80);
@@ -347,7 +383,7 @@ export async function runIdentifyPipeline(
     assertDeadline(deadlineAt);
   } catch (error) {
     if (error instanceof RequestDeadlineError) throw error;
-    const fallback = korean.candidates;
+    const fallback = selectSingleCandidate(korean.candidates);
     if (fallback.length === 0) {
       return { status: 'FAILED', stages: { imageAnalysis: 'SUCCESS', finalJudgment: 'FAILED' }, candidates: [], analysis, verificationStatus: getVerificationStatus(error), failureStage: 'finalJudgment', failureReason: isQuotaError(error) ? 'RATE_LIMITED' : 'UPSTREAM_ERROR' };
     }
@@ -361,7 +397,7 @@ export async function runIdentifyPipeline(
   return {
     status: korean.hadFailure ? 'PARTIAL_SUCCESS' : 'SUCCESS',
     stages: { imageAnalysis: 'SUCCESS', finalJudgment: 'SUCCESS' },
-    candidates: judgedCandidates,
+    candidates: selectSingleCandidate(judgedCandidates, korean.candidates),
     analysis,
     ...(korean.hadFailure ? { failureStage: 'finalJudgment' as const, failureReason: 'UPSTREAM_ERROR' as const } : {}),
   };

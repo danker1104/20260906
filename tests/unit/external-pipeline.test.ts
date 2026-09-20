@@ -187,6 +187,6 @@ describe('external manga research pipeline', () => {
 
     const koreanQueries = queries.filter((query) => query.includes('한국'));
     expect(koreanQueries.length).toBeLessThanOrEqual(2);
-    expect(result.candidates).toHaveLength(3);
+    expect(result.candidates).toHaveLength(1);
   });
 });

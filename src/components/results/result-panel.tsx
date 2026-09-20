@@ -39,11 +39,13 @@ export function ResultPanel({ result }: ResultPanelProps) {
             <div className="candidate-content">
               <h3 className="japanese-title-heading">{candidate.japaneseTitle}</h3>
               <p className="pronunciation">{candidate.pronunciation ?? '발음 정보 확인 불충분'}</p>
-              <section className="korean-info" aria-labelledby={`korean-info-${candidate.rank}`}>
-                <h4 id={`korean-info-${candidate.rank}`}>한국어 정보</h4>
-                <p className="korean-title">{candidate.koreanTitle ?? '한국어 제목 확인 불충분'}</p>
-                <div className="badge-row"><span>{titleStatusLabels[candidate.koreanTitleStatus]}</span><span>{publicationLabels[candidate.publicationStatus]}</span></div>
-              </section>
+              {(candidate.koreanTitle || candidate.koreanTitleStatus !== 'UNKNOWN' || candidate.publicationStatus !== 'UNKNOWN') && (
+                <section className="korean-info" aria-labelledby={`korean-info-${candidate.rank}`}>
+                  <h4 id={`korean-info-${candidate.rank}`}>한국어 정보</h4>
+                  <p className="korean-title">{candidate.koreanTitle ?? '한국어 제목 확인 불충분'}</p>
+                  <div className="badge-row"><span>{titleStatusLabels[candidate.koreanTitleStatus]}</span><span>{publicationLabels[candidate.publicationStatus]}</span></div>
+                </section>
+              )}
             </div>
           </article>
         ))}
