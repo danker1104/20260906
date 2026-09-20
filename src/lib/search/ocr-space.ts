@@ -36,12 +36,6 @@ export async function extractJapaneseText(image: PreparedImage): Promise<OcrExtr
 
     const extension = image.mimeType === 'image/jpeg' ? 'jpg' : image.mimeType.split('/')[1];
     const file = new File([new Uint8Array(image.buffer)], `manga-image.${extension}`, { type: image.mimeType });
-    console.info('[OCR REQUEST]');
-    console.info('status:', 'sending');
-    console.info('filename:', file.name);
-    console.info('type:', file.type);
-    console.info('size:', file.size);
-
     const formData = new FormData();
     formData.append('file', file);
     formData.append('language', process.env.language?.trim() || 'jpn');
@@ -57,15 +51,6 @@ export async function extractJapaneseText(image: PreparedImage): Promise<OcrExtr
     const responseRecord = responseData && typeof responseData === 'object'
       ? responseData as Record<string, unknown>
       : {};
-    console.info('[OCR RESPONSE]');
-    console.info('status:', response.status);
-    console.info('IsErroredOnProcessing:', responseRecord.IsErroredOnProcessing);
-    console.info('ErrorMessage:', responseRecord.ErrorMessage);
-    console.info('ErrorDetails:', responseRecord.ErrorDetails);
-    console.info('OCRExitCode:', responseRecord.OCRExitCode);
-    console.info('ParsedResults:', responseRecord.ParsedResults);
-    console.info('[OCR RESPONSE JSON]', JSON.stringify(responseData));
-
     const parsed = ocrResponseSchema.safeParse(responseData);
     if (!response.ok || !parsed.success || parsed.data.IsErroredOnProcessing === true || parsed.data.IsErroredOnProcessing === 'true') {
       throw new ExternalProviderError('OCR_SPACE_ERROR');
@@ -76,8 +61,6 @@ export async function extractJapaneseText(image: PreparedImage): Promise<OcrExtr
       .filter(Boolean)
       .join('\n');
     const text = cleanOcrText(rawText);
-    console.info('[OCR RAW]', JSON.stringify(rawText));
-    console.info('[OCR CLEANED]', JSON.stringify(text));
     return { text, valid: isUsefulJapaneseText(text) };
   } catch (error) {
     if (!(error instanceof ExternalProviderError)) {

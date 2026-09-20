@@ -8,6 +8,7 @@ import { searchTavily } from '../search/tavily';
 import { searchGoogleLens } from '../search/serpapi';
 import type { LensMatch, OcrExtraction, ResearchBundle, ResearchProviders, WebSearchResult } from '../search/types';
 import { ExternalProviderError, uniqueBy } from '../search/provider-utils';
+import { assertDeadline, getTotalTimeoutMs, RequestDeadlineError } from './request-deadline';
 
 export type { ResearchProviders } from '../search/types';
 
@@ -67,18 +68,19 @@ async function searchTavilyQueries(
   providers: ResearchProviders,
   queries: string[],
   clues: string[] = [],
+  deadlineAt = Date.now() + getTotalTimeoutMs(),
 ): Promise<WebSearchResult[]> {
   const results: WebSearchResult[] = [];
   for (const query of queries.slice(0, 2)) {
-    console.info('[TAVILY QUERY]', JSON.stringify(query));
+    assertDeadline(deadlineAt);
     try {
       const response = await providers.tavily(query);
-      console.info('[TAVILY RESULT COUNT]', response.length);
+      assertDeadline(deadlineAt);
       results.push(...response);
       if (clues.length > 0 && response.some((result) => hasRelevantResult(result, clues))) break;
     } catch (error) {
+      if (error instanceof RequestDeadlineError) throw error;
       logProviderFailure(error);
-      console.info('[TAVILY RESULT COUNT]', 0);
     }
   }
   return uniqueBy(results, (result) => result.url).slice(0, 10);
@@ -87,12 +89,15 @@ async function searchTavilyQueries(
 async function runLensFallback(
   providers: ResearchProviders,
   images: PreparedImage[],
+  deadlineAt: number,
 ): Promise<LensMatch[]> {
-  console.info('[LENS FALLBACK]', true);
+  assertDeadline(deadlineAt);
   try {
     const matches = await providers.lens(selectLensImage(images));
+    assertDeadline(deadlineAt);
     return matches;
   } catch (error) {
+    if (error instanceof RequestDeadlineError) throw error;
     logProviderFailure(error);
     return [];
   }
@@ -160,6 +165,7 @@ async function enrichKoreanInformation(
   candidates: Candidate[],
   tavily: ResearchProviders['tavily'],
   ocrTexts: string[] = [],
+  deadlineAt = Date.now() + getTotalTimeoutMs(),
 ): Promise<{ candidates: Candidate[]; hadFailure: boolean; queries: string[] }> {
   let hadFailure = false;
   const japaneseTitles = uniqueBy(candidates.map((candidate) => extractJapaneseTitle(candidate.japaneseTitle)).filter(Boolean), (value) => value);
@@ -171,16 +177,15 @@ async function enrichKoreanInformation(
   ];
   let results: WebSearchResult[] = [];
   for (const query of queries.slice(0, 2)) {
-    console.info('[TAVILY QUERY]', JSON.stringify(query));
+    assertDeadline(deadlineAt);
     try {
       const response = await tavily(query);
-      console.info('[TAVILY RESULT COUNT]', response.length);
+      assertDeadline(deadlineAt);
       results = uniqueBy([...results, ...response], (result) => result.url).slice(0, 10);
       if (results.length > 0) break;
     } catch (error) {
       logProviderFailure(error);
       hadFailure = true;
-      console.info('[TAVILY RESULT COUNT]', 0);
     }
   }
   const koreanEvidence = results.map((result) => `${result.title} ${result.content}`).join(' ');
@@ -216,8 +221,10 @@ function defaultProviders(gateway?: GeminiGateway): ResearchProviders {
 export async function runIdentifyPipeline(
   images: PreparedImage[],
   providersOrGateway: ResearchProviders | GeminiGateway = defaultProviders(),
+  deadlineAt = Date.now() + getTotalTimeoutMs(),
 ): Promise<IdentifyPipelineResult> {
   const providers = 'judge' in providersOrGateway ? providersOrGateway : defaultProviders(providersOrGateway);
+  assertDeadline(deadlineAt);
   const ocrResults: OcrExtraction[] = await Promise.all(images.map(async (image) => {
     try {
       return await providers.ocr(image);
@@ -226,31 +233,30 @@ export async function runIdentifyPipeline(
       return { text: '', valid: false };
     }
   }));
+  assertDeadline(deadlineAt);
   const ocrTexts = uniqueBy(ocrResults.filter((result) => result.valid).map((result) => result.text), (text) => text);
   let lensMatches: LensMatch[] = [];
   let queries = toJapaneseQueries(ocrTexts, []);
-  let uniqueTavilyResults = await searchTavilyQueries(providers, queries, ocrTexts);
+  let uniqueTavilyResults = await searchTavilyQueries(providers, queries, ocrTexts, deadlineAt);
   let relevantTavilyResults = ocrTexts.length > 0
     ? uniqueTavilyResults.filter((result) => hasRelevantResult(result, ocrTexts))
     : uniqueTavilyResults;
 
   if (ocrTexts.length === 0 || relevantTavilyResults.length === 0) {
-    lensMatches = await runLensFallback(providers, images);
+    lensMatches = await runLensFallback(providers, images, deadlineAt);
     if (lensMatches.length > 0) {
       const lensQueries = toJapaneseQueries([], lensMatches);
       queries = [...queries, ...lensQueries];
-      const lensTavilyResults = await searchTavilyQueries(providers, lensQueries, lensMatches.map((match) => match.title));
+      const lensTavilyResults = await searchTavilyQueries(providers, lensQueries, lensMatches.map((match) => match.title), deadlineAt);
       uniqueTavilyResults = uniqueBy([...uniqueTavilyResults, ...lensTavilyResults], (result) => result.url).slice(0, 10);
       relevantTavilyResults = ocrTexts.length > 0
         ? uniqueTavilyResults.filter((result) => hasRelevantResult(result, [...ocrTexts, ...lensMatches.map((match) => match.title)]))
         : uniqueTavilyResults;
     }
   } else {
-    console.info('[LENS FALLBACK]', false);
   }
 
   const seeds = candidateSeeds(relevantTavilyResults, lensMatches);
-  console.info('[CANDIDATES]', JSON.stringify(seeds));
   const analysis = buildAnalysis(ocrTexts, queries, lensMatches);
 
   if (seeds.length === 0) {
@@ -263,11 +269,14 @@ export async function runIdentifyPipeline(
   }
 
   const research: ResearchBundle = { ocrTexts, tavilyResults: uniqueTavilyResults, lensMatches, candidateSeeds: seeds };
+  assertDeadline(deadlineAt);
   let judgedCandidates: Candidate[];
   try {
     judgedCandidates = normalizeCandidates(await providers.judge(research));
+    assertDeadline(deadlineAt);
   } catch (error) {
-    const fallbackKorean = await enrichKoreanInformation(fallbackCandidates(seeds), providers.tavily, ocrTexts);
+    if (error instanceof RequestDeadlineError) throw error;
+    const fallbackKorean = await enrichKoreanInformation(fallbackCandidates(seeds), providers.tavily, ocrTexts, deadlineAt);
     const fallback = fallbackKorean.candidates;
     if (fallback.length === 0) {
       return { status: 'FAILED', stages: { imageAnalysis: 'SUCCESS', finalJudgment: 'FAILED' }, candidates: [], analysis, verificationStatus: getVerificationStatus(error), failureStage: 'finalJudgment', failureReason: isQuotaError(error) ? 'RATE_LIMITED' : 'UPSTREAM_ERROR' };
@@ -279,7 +288,7 @@ export async function runIdentifyPipeline(
     return { status: 'INSUFFICIENT', stages: { imageAnalysis: 'SUCCESS', finalJudgment: 'INSUFFICIENT' }, candidates: [], analysis };
   }
 
-  const korean = await enrichKoreanInformation(judgedCandidates, providers.tavily, ocrTexts);
+  const korean = await enrichKoreanInformation(judgedCandidates, providers.tavily, ocrTexts, deadlineAt);
   analysis.searchQueries.korean = korean.queries;
   return {
     status: korean.hadFailure ? 'PARTIAL_SUCCESS' : 'SUCCESS',

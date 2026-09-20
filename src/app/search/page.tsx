@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { AnalysisProgress } from '../../components/analysis/analysis-progress';
 import { ResultPanel } from '../../components/results/result-panel';
 import { ImageUploader } from '../../components/upload/image-uploader';
+import { errorResponseSchema, identifyResponseSchema } from '../../lib/domain/schemas';
 import type { IdentifyResponse, StageStatus } from '../../lib/domain/types';
 import { emitSceneEvent } from '../../lib/spline/scene-bus';
 
@@ -28,15 +29,24 @@ export default function SearchPage() {
     files.forEach((file) => formData.append('images', file));
     try {
       const response = await fetch('/api/identify', { method: 'POST', body: formData });
-      const body = await response.json();
+      const body: unknown = await response.json().catch(() => null);
       if (!response.ok) {
-        setError(body?.error?.message ?? '검색 요청을 처리하지 못했습니다.');
+        const parsedError = errorResponseSchema.safeParse(body);
+        setError(parsedError.success ? parsedError.data.error.message : '검색 요청을 처리하지 못했습니다.');
         setStages({ imageAnalysis: 'FAILED', finalJudgment: 'SKIPPED' });
         emitSceneEvent('pipeline:error');
         return;
       }
-      setResult(body as IdentifyResponse);
-      setStages((body as IdentifyResponse).stages);
+      const parsedResponse = identifyResponseSchema.safeParse(body);
+      if (!parsedResponse.success) {
+        setError('검색 결과를 확인하지 못했습니다. 다시 시도해 주세요.');
+        setStages({ imageAnalysis: 'FAILED', finalJudgment: 'SKIPPED' });
+        emitSceneEvent('pipeline:error');
+        return;
+      }
+      const identifyResponse: IdentifyResponse = parsedResponse.data;
+      setResult(identifyResponse);
+      setStages(identifyResponse.stages);
       emitSceneEvent('pipeline:success');
     } catch {
       setError('네트워크 연결을 확인하고 다시 시도해 주세요.');

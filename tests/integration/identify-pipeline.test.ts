@@ -64,18 +64,33 @@ describe('external manga research pipeline', () => {
   });
 
   it('keeps Tavily Korean information when Gemini judgment is unavailable', async () => {
+    let judgmentCalls = 0;
     const result = await runIdentifyPipeline([preparedImage], providers({
       tavily: async (query) => query.includes('한국')
         ? [{ title: '작품명 한국어판', url: 'https://example.com/kr', content: '작품명 정발 공식 판매', score: 0.9 }]
         : [{ title: '作品名 漫画', url: 'https://example.com/jp', content: '作品名 漫画', score: 0.9 }],
       judge: async () => {
+        judgmentCalls += 1;
         throw Object.assign(new Error('temporary unavailable'), { status: 503 });
       },
     }));
 
+    expect(judgmentCalls).toBe(1);
     expect(result.status).toBe('PARTIAL_SUCCESS');
     expect(result.verificationStatus).toBe('AI_UNAVAILABLE');
     expect(result.candidates[0]?.koreanTitleStatus).toBe('OFFICIAL');
     expect(result.candidates[0]?.publicationStatus).toBe('CONFIRMED');
+  });
+
+  it('stops before provider work when the request deadline has expired', async () => {
+    let ocrCalls = 0;
+    await expect(runIdentifyPipeline([preparedImage], providers({
+      ocr: async () => {
+        ocrCalls += 1;
+        return { text: '作品名 漫画', valid: true };
+      },
+    }), Date.now() - 1)).rejects.toThrow('요청 처리 시간이 초과되었습니다.');
+
+    expect(ocrCalls).toBe(0);
   });
 });

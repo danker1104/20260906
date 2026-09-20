@@ -1,7 +1,7 @@
 import { createErrorResponse, ImageValidationError } from '../../../lib/domain/errors';
 import { GeminiConfigurationError } from '../../../lib/ai/gemini-gateway';
 import { getRequestId } from '../../../lib/observability/request-id';
-import { getTotalTimeoutMs, hasDeadlineExpired } from '../../../lib/pipeline/request-deadline';
+import { getTotalTimeoutMs, hasDeadlineExpired, RequestDeadlineError } from '../../../lib/pipeline/request-deadline';
 import { runIdentifyPipeline } from '../../../lib/pipeline/identify-pipeline';
 import { mapPipelineResponse, ResponseMappingError } from '../../../lib/pipeline/response-mapper';
 import { logIdentifyEvent } from '../../../lib/observability/event-logger';
@@ -70,7 +70,7 @@ export async function POST(request: Request): Promise<Response> {
       );
     }
 
-    const pipelineResult = await runIdentifyPipeline(preparedImages);
+    const pipelineResult = await runIdentifyPipeline(preparedImages, undefined, startedAt + getTotalTimeoutMs());
     const response = mapPipelineResponse(requestId, pipelineResult);
     if (pipelineResult.failureStage) {
       logIdentifyEvent({
@@ -101,6 +101,11 @@ export async function POST(request: Request): Promise<Response> {
         createErrorResponse('UPSTREAM_UNAVAILABLE', 'AI 서비스 설정을 사용할 수 없습니다.', requestId),
         { status: 503 },
       );
+    }
+
+    if (error instanceof RequestDeadlineError) {
+      logIdentifyEvent({ event: 'identify_completed', requestId, outcome: 'TIMEOUT', latencyMs: Date.now() - startedAt });
+      return Response.json(createErrorResponse('TIMEOUT', error.message, requestId), { status: 504 });
     }
 
     if (error instanceof ResponseMappingError) {

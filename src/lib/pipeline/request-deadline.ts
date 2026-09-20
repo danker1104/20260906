@@ -1,6 +1,13 @@
 export const DEFAULT_TOTAL_TIMEOUT_MS = 60_000;
 export const DEFAULT_INTER_CALL_DELAY_MS = 5_000;
 
+export class RequestDeadlineError extends Error {
+  constructor() {
+    super('요청 처리 시간이 초과되었습니다.');
+    this.name = 'RequestDeadlineError';
+  }
+}
+
 export function getTotalTimeoutMs(): number {
   const configuredTimeout = Number(process.env.GEMINI_TOTAL_TIMEOUT_MS ?? DEFAULT_TOTAL_TIMEOUT_MS);
 
@@ -13,6 +20,10 @@ export function getTotalTimeoutMs(): number {
 
 export function hasDeadlineExpired(startedAt: number, timeoutMs = getTotalTimeoutMs()): boolean {
   return Date.now() - startedAt >= timeoutMs;
+}
+
+export function assertDeadline(deadlineAt: number): void {
+  if (Date.now() >= deadlineAt) throw new RequestDeadlineError();
 }
 
 export function getInterCallDelayMs(): number {
