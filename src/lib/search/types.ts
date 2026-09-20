@@ -1,8 +1,11 @@
 import type { PreparedImage } from '../domain/types';
 
+export type QueryType = 'TITLE' | 'DIALOGUE' | 'NONE';
+
 export interface OcrExtraction {
   text: string;
   valid: boolean;
+  rawText?: string;
 }
 
 export interface WebSearchResult {

@@ -8,6 +8,7 @@ import { searchTavily } from '../search/tavily';
 import { searchGoogleLens } from '../search/serpapi';
 import type { LensMatch, OcrExtraction, ResearchBundle, ResearchProviders, WebSearchResult } from '../search/types';
 import { ExternalProviderError, uniqueBy } from '../search/provider-utils';
+import { buildRefinedJapaneseQueries, refineOcrQueries } from '../search/query-refinement';
 import { assertDeadline, getTotalTimeoutMs, RequestDeadlineError } from './request-deadline';
 
 export type { ResearchProviders } from '../search/types';
@@ -120,7 +121,7 @@ function buildAnalysis(ocrTexts: string[], queries: string[], lensMatches: LensM
   };
 }
 
-function candidateSeeds(tavilyResults: WebSearchResult[], lensMatches: LensMatch[]): string[] {
+function candidateSeeds(tavilyResults: WebSearchResult[], lensMatches: LensMatch[], titleCandidates: string[] = []): string[] {
   const lensCandidateClues = uniqueBy(lensMatches.map((match) => match.title
     .replace(/\s*(?:第\s*\d+\s*(?:話|巻|章)|chapter\s*\d+|episode\s*\d+).*$/iu, '')
     .replace(/\b(?:manga|comic|official|chapter|episode)\b/giu, '')
@@ -128,6 +129,7 @@ function candidateSeeds(tavilyResults: WebSearchResult[], lensMatches: LensMatch
     .trim()).filter((title) => title.length >= 2), (title) => title).slice(0, 5);
   if (process.env.NODE_ENV !== 'production') console.info('[LENS CANDIDATES]', lensCandidateClues);
   return uniqueBy([
+    ...titleCandidates,
     ...tavilyResults.map((result) => result.title),
     ...lensCandidateClues,
   ], (title) => title)
@@ -327,11 +329,23 @@ export async function runIdentifyPipeline(
   }));
   assertDeadline(deadlineAt);
   const ocrTexts = uniqueBy(ocrResults.filter((result) => result.valid).map((result) => result.text), (text) => text);
+  const refinement = refineOcrQueries(ocrResults.map((result) => result.rawText ?? result.text));
+  const searchClues = refinement.queryType === 'TITLE' ? refinement.titleCandidates : refinement.dialogueCandidates;
+  if (process.env.NODE_ENV !== 'production') {
+    console.info('[OCR RAW]', refinement.rawText);
+    console.info('[QUERY REFINEMENT]', {
+      titleCandidates: refinement.titleCandidates,
+      dialogueCandidates: refinement.dialogueCandidates,
+      noise: refinement.noise,
+      queryType: refinement.queryType,
+    });
+  }
   let lensMatches: LensMatch[] = [];
-  let queries = toJapaneseQueries(ocrTexts, []);
-  let uniqueTavilyResults = await searchTavilyQueries(providers, queries, ocrTexts, deadlineAt);
-  let relevantTavilyResults = ocrTexts.length > 0
-    ? uniqueTavilyResults.filter((result) => hasRelevantResult(result, ocrTexts))
+  let queries = buildRefinedJapaneseQueries(refinement);
+  if (process.env.NODE_ENV !== 'production') console.info('[REFINED JAPANESE QUERY]', queries);
+  let uniqueTavilyResults = await searchTavilyQueries(providers, queries, searchClues, deadlineAt);
+  let relevantTavilyResults = searchClues.length > 0
+    ? uniqueTavilyResults.filter((result) => hasRelevantResult(result, searchClues))
     : uniqueTavilyResults;
 
   if (ocrTexts.length === 0 || relevantTavilyResults.length === 0) {
@@ -346,13 +360,13 @@ export async function runIdentifyPipeline(
       queries = [...queries, ...lensQueries];
       const lensTavilyResults = await searchTavilyQueries(providers, lensQueries, lensMatches.map((match) => match.title), deadlineAt);
       uniqueTavilyResults = uniqueBy([...uniqueTavilyResults, ...lensTavilyResults], (result) => result.url).slice(0, 10);
-      relevantTavilyResults = ocrTexts.length > 0
-        ? uniqueTavilyResults.filter((result) => hasRelevantResult(result, [...ocrTexts, ...lensMatches.map((match) => match.title)]))
+      relevantTavilyResults = searchClues.length > 0
+        ? uniqueTavilyResults.filter((result) => hasRelevantResult(result, [...searchClues, ...lensMatches.map((match) => match.title)]))
         : uniqueTavilyResults;
     }
   }
 
-  const seeds = candidateSeeds(relevantTavilyResults, lensMatches);
+  const seeds = candidateSeeds(relevantTavilyResults, lensMatches, refinement.titleCandidates);
   if (process.env.NODE_ENV !== 'production') {
     console.info('[IDENTIFICATION PATH]', lensMatches.length > 0 ? 'LENS_TAVILY_FOUNDRY' : 'OCR_TAVILY_FOUNDRY');
   }

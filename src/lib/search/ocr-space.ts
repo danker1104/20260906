@@ -63,7 +63,7 @@ export async function extractJapaneseText(image: PreparedImage): Promise<OcrExtr
       console.info('[OCR TEXT]', text);
       console.info('[OCR USEFUL]', isUsefulJapaneseText(text));
     }
-    return { text, valid: isUsefulJapaneseText(text) };
+    return { text, rawText, valid: isUsefulJapaneseText(text) };
   } catch (error) {
     if (!(error instanceof ExternalProviderError)) {
       console.error('[OCR ERROR]', error instanceof Error ? error.message : String(error));
