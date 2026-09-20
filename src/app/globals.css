@@ -16,7 +16,7 @@ a { color: inherit; }
 .brand { font-size: 1.05rem; font-weight: 800; letter-spacing: -.04em; text-decoration: none; }
 .topbar-note, .step-count, .section-kicker, .confidence, .candidate-rank { color: var(--muted); font-family: 'DM Mono', monospace; font-size: .7rem; letter-spacing: .08em; text-transform: uppercase; }
 .hero { display: grid; grid-template-columns: minmax(0, 1fr) 1fr; gap: 40px; padding: 92px 0 84px; border-bottom: 1px solid var(--line); }
-.hero h1 { max-width: 600px; margin: 14px 0 22px; font-size: clamp(4rem, 10vw, 8.5rem); line-height: .86; letter-spacing: -.09em; }
+.hero h1 { max-width: 600px; margin: 14px 0 22px; font-size: clamp(4rem, 10vw, 8.5rem); line-height: 1.02; letter-spacing: -.07em; text-wrap: balance; }
 .hero h1 em { color: var(--accent); font-style: normal; }
 .hero p { color: #c7c8c6; font-size: 1.08rem; line-height: 1.7; }
 .hero-signal { align-self: end; display: grid; grid-template-columns: auto 1fr; gap: 18px 20px; max-width: 320px; margin-left: auto; color: var(--muted); font-family: 'DM Mono', monospace; font-size: .75rem; }
