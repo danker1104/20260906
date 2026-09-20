@@ -79,17 +79,11 @@ export function SplineHeroScene() {
           let mode: SceneMode = 'idle';
           let rotationAccum = 0;
 
-          // Best-effort hooks into anything authored in the Spline Editor for this mode
-          // (a matching State name, or a Mouse Hover / Start event) — no-ops if the
-          // artist hasn't wired them up yet, the transform loop below drives it either way.
+          // The transform loop below owns these modes so the scene stays compatible
+          // with exported material layers that do not support runtime transitions.
           const applyMode = (next: SceneMode) => {
             mode = next;
             if (!target) return;
-            try {
-              target.transition({ to: next });
-            } catch {
-              /* no matching authored state for this mode */
-            }
             try {
               if (next === 'ctaHover' || next === 'uploadHover' || next === 'dragging') {
                 app?.emitEvent('mouseHover', target.name);

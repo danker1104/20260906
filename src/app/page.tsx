@@ -3,7 +3,6 @@ import { InstallPrompt } from '../components/website/install-prompt';
 import { HeroMotion } from '../components/website/hero-motion';
 import { MotionReveal, ParallaxStage } from '../components/website/motion-reveal';
 import { SceneCtaLink } from '../components/website/scene-cta-link';
-import { IntroScene } from '../components/website/intro-scene';
 
 const steps = [
   { number: '01', title: '캡처를 올려요', text: 'JPG, PNG, WebP 이미지를 최대 3장까지 선택하세요.' },
@@ -15,7 +14,6 @@ export default function WebsiteHomePage() {
   return (
     <main className="site-shell">
       <a className="skip-link" href="#site-title">본문으로 건너뛰기</a>
-      <IntroScene />
       <header className="site-nav">
         <Link className="brand" href="/">MangaFind</Link>
         <nav aria-label="주요 메뉴"><a href="#how-it-works">찾는 방법</a><a href="#result-example">결과 예시</a><InstallPrompt className="nav-cta" label="설치하기" /></nav>

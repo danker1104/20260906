@@ -1,5 +1,4 @@
 import type { Metadata } from 'next';
-import { SplineHeroScene } from '../components/website/spline-hero-scene';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -27,7 +26,6 @@ export default function RootLayout({
   return (
     <html lang="ko">
       <body>
-        <SplineHeroScene />
         {children}
       </body>
     </html>
