@@ -1,9 +1,9 @@
 import Link from 'next/link';
 import { InstallPrompt } from '../components/website/install-prompt';
-import { GpuHeroBackground } from '../components/website/gpu-hero-background';
-import { SplineHeroScene } from '../components/website/spline-hero-scene';
 import { HeroMotion } from '../components/website/hero-motion';
 import { MotionReveal, ParallaxStage } from '../components/website/motion-reveal';
+import { SceneCtaLink } from '../components/website/scene-cta-link';
+import { IntroScene } from '../components/website/intro-scene';
 
 const steps = [
   { number: '01', title: '캡처를 올려요', text: 'JPG, PNG, WebP 이미지를 최대 3장까지 선택하세요.' },
@@ -15,23 +15,22 @@ export default function WebsiteHomePage() {
   return (
     <main className="site-shell">
       <a className="skip-link" href="#site-title">본문으로 건너뛰기</a>
+      <IntroScene />
       <header className="site-nav">
         <Link className="brand" href="/">MangaFind</Link>
         <nav aria-label="주요 메뉴"><a href="#how-it-works">찾는 방법</a><a href="#result-example">결과 예시</a><InstallPrompt className="nav-cta" label="설치하기" /></nav>
       </header>
       <section className="site-hero" aria-labelledby="site-title">
-        <GpuHeroBackground />
-        <SplineHeroScene />
         <HeroMotion>
           <div className="site-hero-copy">
             <p className="site-eyebrow" data-hero-block>Manga identification for the moments you save</p>
             <h1 id="site-title" data-hero-block><span data-hero-word>이 </span><span data-hero-word>만화, </span><span data-hero-word>뭐였지?</span></h1>
             <p className="site-lede" data-hero-block><span data-hero-word>SNS에서 </span><span data-hero-word>발견한 </span><span data-hero-word>일본 </span><span data-hero-word>만화를 </span><br /><span data-hero-word>캡처 </span><span data-hero-word>한 </span><span data-hero-word>장으로 </span><span data-hero-word>찾아보세요.</span></p>
-            <div className="site-actions" data-hero-block><Link className="site-primary-cta" href="/search">이미지로 만화 찾기 <span aria-hidden="true">↗</span></Link><a className="site-text-cta" href="#how-it-works">어떻게 찾는지 보기</a></div>
+            <div className="site-actions" data-hero-block><SceneCtaLink className="site-primary-cta" href="/search">이미지로 만화 찾기 <span aria-hidden="true">↗</span></SceneCtaLink><a className="site-text-cta" href="#how-it-works">어떻게 찾는지 보기</a></div>
           </div>
         </HeroMotion>
-        <ParallaxStage><div className="search-story hero-story-sequence" aria-label="이미지에서 만화 제목을 찾는 과정"><div className="story-image-card"><span className="story-tag">your screenshot</span><div className="manga-frame manga-frame-top"><span>薫る花は</span><strong>凛と咲く</strong></div><span className="story-caption">장면 캡처</span></div><div className="story-line" aria-hidden="true"><span>image clue</span><i>↓</i></div><div className="story-result-card"><span className="story-tag">identified</span><p>薫る花は凛と咲く</p><strong>향기로운 꽃은 늠름하게 핀다</strong><small>정식 제목 · 정발 확인</small></div></div></ParallaxStage>
       </section>
+      <ParallaxStage><div className="search-story hero-story-sequence" aria-label="이미지에서 만화 제목을 찾는 과정"><div className="story-image-card"><span className="story-tag">your screenshot</span><div className="manga-frame manga-frame-top"><span>薫る花は</span><strong>凛と咲く</strong></div><span className="story-caption">장면 캡처</span></div><div className="story-line" aria-hidden="true"><span>image clue</span><i>↓</i></div><div className="story-result-card"><span className="story-tag">identified</span><p>薫る花は凛と咲く</p><strong>향기로운 꽃은 늠름하게 핀다</strong><small>정식 제목 · 정발 확인</small></div></div></ParallaxStage>
       <MotionReveal variant="slice"><section className="situation-band" aria-labelledby="situation-title"><p className="site-eyebrow">For the scene you saved</p><h2 id="situation-title">제목을 놓친 장면은<br /><em>생각보다 자주 남아요.</em></h2><div className="situation-grid"><p>짧은 영상에서 스쳐간 한 컷</p><p>일본어 대사만 남은 캡처</p><p>제목 없이 공유된 장면</p></div></section></MotionReveal>
       <MotionReveal><section className="steps-section" id="how-it-works" aria-labelledby="steps-title"><div className="section-intro"><p className="site-eyebrow">A shorter route to the title</p><h2 id="steps-title">캡처에서 제목까지,<br />세 단계면 충분해요.</h2></div><div className="steps-grid">{steps.map((step, index) => <article className="step-item" key={step.number} style={{ '--step-delay': `${index * 90}ms` } as React.CSSProperties}><span>{step.number}</span><h3>{step.title}</h3><p>{step.text}</p></article>)}</div></section></MotionReveal>
       <MotionReveal variant="drift"><section className="result-example" id="result-example" aria-labelledby="example-title"><div className="section-intro"><p className="site-eyebrow">A result that stays simple</p><h2 id="example-title">찾고 싶은 정보만<br />한 화면에 담아요.</h2></div><div className="example-result-card"><span className="example-label">일본어 원제</span><h3>薫る花は凛と咲く</h3><p className="example-pronunciation">Kaoru Hana wa Rin to Saku</p><div className="example-korean"><span>한국어 정보</span><strong>향기로운 꽃은 늠름하게 핀다</strong><p>정식 제목 <b>·</b> 정발 확인</p></div></div></section></MotionReveal>

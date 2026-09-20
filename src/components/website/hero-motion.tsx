@@ -2,6 +2,7 @@
 
 import { useLayoutEffect, useRef, type ReactNode } from 'react';
 import { animate, createScope, stagger, type Scope } from 'animejs';
+import { emitSceneEvent } from '../../lib/spline/scene-bus';
 
 // Drives the hero copy's entrance stagger via anime.js instead of hard-coded CSS delays.
 export function HeroMotion({ children }: { children: ReactNode }) {
@@ -14,6 +15,8 @@ export function HeroMotion({ children }: { children: ReactNode }) {
 
     root.classList.add('hero-motion-active');
     scopeRef.current = createScope({ root: rootRef }).add(() => {
+      // Same timeline as the text stagger below — the Spline orb enters in step with it.
+      emitSceneEvent('hero:enter');
       animate('[data-hero-block]', {
         opacity: [0, 1],
         translateY: [22, 0],
