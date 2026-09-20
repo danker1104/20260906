@@ -133,15 +133,16 @@ describe('external manga research pipeline', () => {
   });
 
   it('stops Japanese Tavily search after the first strong result', async () => {
-    let tavilyCalls = 0;
+    const queries: string[] = [];
     const result = await runIdentifyPipeline([preparedImage], providers({
-      tavily: async () => {
-        tavilyCalls += 1;
+      tavily: async (query) => {
+        queries.push(query);
         return [{ title: '作品名', url: 'https://example.com/work', content: '作品名 漫画', score: 0.95 }];
       },
     }));
 
-    expect(tavilyCalls).toBe(2);
+    expect(queries.filter((query) => !query.includes('한국')).length).toBe(1);
+    expect(queries.filter((query) => query.includes('한국')).length).toBeLessThanOrEqual(2);
     expect(result.status).toBe('SUCCESS');
   });
 

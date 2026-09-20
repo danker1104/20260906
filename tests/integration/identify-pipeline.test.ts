@@ -67,7 +67,7 @@ describe('external manga research pipeline', () => {
     let judgmentCalls = 0;
     const result = await runIdentifyPipeline([preparedImage], providers({
       tavily: async (query) => query.includes('한국')
-        ? [{ title: '작품명 한국어판', url: 'https://example.com/kr', content: '작품명 정발 공식 판매', score: 0.9 }]
+        ? [{ title: '작품명 한국어판', url: 'https://www.yes24.com/Product/Detail/123', content: '작품명 정발 공식 판매', score: 0.9 }]
         : [{ title: '作品名 漫画', url: 'https://example.com/jp', content: '作品名 漫画', score: 0.9 }],
       judge: async () => {
         judgmentCalls += 1;

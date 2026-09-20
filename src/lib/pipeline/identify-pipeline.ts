@@ -164,40 +164,80 @@ function extractRomanizedClues(values: string[]): string[] {
 async function enrichKoreanInformation(
   candidates: Candidate[],
   tavily: ResearchProviders['tavily'],
-  ocrTexts: string[] = [],
   deadlineAt = Date.now() + getTotalTimeoutMs(),
-): Promise<{ candidates: Candidate[]; hadFailure: boolean; queries: string[] }> {
+): Promise<{ candidates: Candidate[]; hadFailure: boolean; queries: string[]; results: WebSearchResult[]; titleCandidates: string[] }> {
+  const japaneseTitle = extractJapaneseTitle(candidates[0]?.japaneseTitle ?? '');
+  const queries: string[] = [];
   let hadFailure = false;
-  const japaneseTitles = uniqueBy(candidates.map((candidate) => extractJapaneseTitle(candidate.japaneseTitle)).filter(Boolean), (value) => value);
-  const candidateTitles = japaneseTitles.slice(0, 3).map((title) => `"${title}"`).join(' OR ');
-  const romanizedClues = extractRomanizedClues([...ocrTexts, ...candidates.map((candidate) => candidate.japaneseTitle)]);
-  const queries = [
-    `${candidateTitles} 한국 정발 한국어 제목`,
-    ...(romanizedClues.length > 0 ? [`${romanizedClues.join(' ')} manga Korean title`] : [`${candidateTitles} 한국어 제목 만화`]),
-  ];
   let results: WebSearchResult[] = [];
-  for (const query of queries.slice(0, 2)) {
+  if (process.env.NODE_ENV !== 'production') console.info('[KOREAN SEARCH START]', { japaneseTitle });
+
+  const extractTitleCandidates = (items: WebSearchResult[]): string[] => {
+    const counts = new Map<string, number>();
+    const ignored = /^(공식|판매|정발|출판|출간|한국어|제목|만화|만화책|도서|전자책|eBook)$/u;
+    for (const item of items) {
+      for (const source of [item.title, item.content, item.url]) {
+        const matches = source.match(/[가-힣][가-힣0-9·&'’' -]{1,}/gu) ?? [];
+        for (const match of matches) {
+          const candidate = match
+            .replace(/\s+(?:\d+권?|한국어판|만화책|eBook|전자책|단행본|세트|정발|공식|판매|출간|출판)+\s*$/giu, '')
+            .replace(/\s+/gu, ' ')
+            .trim();
+          if (candidate.length >= 2 && !ignored.test(candidate)) counts.set(candidate, (counts.get(candidate) ?? 0) + 1);
+        }
+      }
+    }
+    return [...counts.entries()].sort((left, right) => right[1] - left[1]).map(([candidate]) => candidate).slice(0, 5);
+  };
+
+  const hasStrongEvidence = (items: WebSearchResult[], titleCandidates: string[]) => items.some((item) => {
+    const haystack = `${item.title} ${item.content}`;
+    const source = item.url.toLowerCase();
+    const hasTitle = titleCandidates.some((candidate) => haystack.includes(candidate));
+    const hasSaleSignal = /정발|출판|출간|한국어판|정식|판매|구매|eBook|전자책|단행본|재고|도서/u.test(haystack);
+    const hasStrongSource = /kyobobook|yes24|aladin|ridibooks|ridi\.|series\.naver|page\.kakao|publisher|출판사/u.test(source);
+    const hasJapaneseSignal = (japaneseTitle.match(/[\u3040-\u30ff\u3400-\u9fff]{2,}/gu) ?? []).some((fragment) => haystack.includes(fragment));
+    return hasTitle && hasSaleSignal && (hasStrongSource || hasJapaneseSignal);
+  });
+
+  const runKoreanQuery = async (query: string, number: 1 | 2) => {
+    queries.push(query);
+    if (process.env.NODE_ENV !== 'production') console.info(`[KOREAN QUERY ${number}]`, { query });
     assertDeadline(deadlineAt);
     try {
       const response = await tavily(query);
       assertDeadline(deadlineAt);
-      results = uniqueBy([...results, ...response], (result) => result.url).slice(0, 10);
-      if (results.length > 0) break;
+      results = uniqueBy([...results, ...response], (result) => result.url).slice(0, 20);
+      if (process.env.NODE_ENV !== 'production') console.info(`[KOREAN RESULT ${number}]`, { count: response.length, results: response });
     } catch (error) {
+      if (error instanceof RequestDeadlineError) throw error;
       logProviderFailure(error);
       hadFailure = true;
     }
+  };
+
+  if (japaneseTitle) await runKoreanQuery(`"${japaneseTitle}" 한국 만화`, 1);
+  let titleCandidates = extractTitleCandidates(results);
+  if (!hasStrongEvidence(results, titleCandidates) && japaneseTitle) {
+    const secondQuery = titleCandidates[0] ? `"${titleCandidates[0]}" 정발` : `"${japaneseTitle}" 한국 정발`;
+    await runKoreanQuery(secondQuery, 2);
+    titleCandidates = extractTitleCandidates(results);
   }
-  const koreanEvidence = results.map((result) => `${result.title} ${result.content}`).join(' ');
-  const hasOfficialSignal = /정발|출판|출간|한국어판|정식/u.test(koreanEvidence);
-  const hasKoreanText = /[가-힣]{2,}/u.test(koreanEvidence);
+
+  const koreanTitleCandidate = titleCandidates[0] ?? null;
+  const strongEvidence = hasStrongEvidence(results, titleCandidates);
+  if (process.env.NODE_ENV !== 'production') {
+    console.info('[KOREAN TITLE CANDIDATE]', { candidate: koreanTitleCandidate });
+    console.info('[KOREAN EVIDENCE]', { evidenceCount: results.length, results });
+  }
   const enriched = candidates.map((candidate) => ({
     ...candidate,
-    koreanTitleStatus: hasOfficialSignal ? 'OFFICIAL' as const : hasKoreanText ? 'COMMON' as const : candidate.koreanTitleStatus,
-    publicationStatus: hasOfficialSignal ? 'CONFIRMED' as const : candidate.publicationStatus,
-    koreanInvestigationStatus: results.length > 0 ? 'SUCCESS' as const : 'INSUFFICIENT' as const,
+    koreanTitle: candidate.rank === 1 ? koreanTitleCandidate : candidate.koreanTitle,
+    koreanTitleStatus: candidate.rank === 1 && koreanTitleCandidate && strongEvidence ? 'OFFICIAL' as const : candidate.koreanTitleStatus,
+    publicationStatus: candidate.rank === 1 && strongEvidence ? 'CONFIRMED' as const : candidate.publicationStatus,
+    koreanInvestigationStatus: koreanTitleCandidate ? 'SUCCESS' as const : 'INSUFFICIENT' as const,
   }));
-  return { candidates: enriched, hadFailure, queries };
+  return { candidates: enriched, hadFailure, queries, results, titleCandidates };
 }
 
 function defaultProviders(gateway?: AzureFoundryGateway): ResearchProviders {
@@ -206,7 +246,20 @@ function defaultProviders(gateway?: AzureFoundryGateway): ResearchProviders {
     tavily: searchTavily,
     lens: searchGoogleLens,
     judge: async (bundle: ResearchBundle) => {
+      if (process.env.NODE_ENV !== 'production') {
+        console.info('[FOUNDRY KOREAN INPUT]', {
+          titleCandidate: bundle.koreanTitleCandidates?.[0] ?? null,
+          evidenceCount: bundle.koreanResults?.length ?? 0,
+        });
+      }
       const outcome = await finalJudgment(gateway ?? createAzureFoundryGateway(), bundle);
+      if (process.env.NODE_ENV !== 'production') {
+        console.info('[KOREAN FINAL DECISION]', {
+          title: outcome.data?.[0]?.koreanTitle ?? null,
+          release: outcome.data?.[0]?.publicationStatus ?? null,
+          status: outcome.status,
+        });
+      }
       if (outcome.status !== 'SUCCESS' || !outcome.data) {
         const error = new Error(outcome.failureReason === 'RATE_LIMITED' ? 'Azure Foundry quota exceeded' : outcome.failureReason ?? 'Azure Foundry judgment failed');
         error.name = outcome.failureReason === 'RATE_LIMITED' ? 'AZURE_FOUNDRY_QUOTA_ERROR' : 'AZURE_FOUNDRY_ERROR';
@@ -268,7 +321,16 @@ export async function runIdentifyPipeline(
     };
   }
 
-  const research: ResearchBundle = { ocrTexts, tavilyResults: uniqueTavilyResults, lensMatches, candidateSeeds: seeds };
+  const korean = await enrichKoreanInformation(fallbackCandidates(seeds), providers.tavily, deadlineAt);
+  analysis.searchQueries.korean = korean.queries;
+  const research: ResearchBundle = {
+    ocrTexts,
+    tavilyResults: uniqueTavilyResults,
+    lensMatches,
+    candidateSeeds: seeds,
+    koreanResults: korean.results,
+    koreanTitleCandidates: korean.titleCandidates,
+  };
   assertDeadline(deadlineAt);
   let judgedCandidates: Candidate[];
   try {
@@ -276,8 +338,7 @@ export async function runIdentifyPipeline(
     assertDeadline(deadlineAt);
   } catch (error) {
     if (error instanceof RequestDeadlineError) throw error;
-    const fallbackKorean = await enrichKoreanInformation(fallbackCandidates(seeds), providers.tavily, ocrTexts, deadlineAt);
-    const fallback = fallbackKorean.candidates;
+    const fallback = korean.candidates;
     if (fallback.length === 0) {
       return { status: 'FAILED', stages: { imageAnalysis: 'SUCCESS', finalJudgment: 'FAILED' }, candidates: [], analysis, verificationStatus: getVerificationStatus(error), failureStage: 'finalJudgment', failureReason: isQuotaError(error) ? 'RATE_LIMITED' : 'UPSTREAM_ERROR' };
     }
@@ -288,12 +349,10 @@ export async function runIdentifyPipeline(
     return { status: 'INSUFFICIENT', stages: { imageAnalysis: 'SUCCESS', finalJudgment: 'INSUFFICIENT' }, candidates: [], analysis };
   }
 
-  const korean = await enrichKoreanInformation(judgedCandidates, providers.tavily, ocrTexts, deadlineAt);
-  analysis.searchQueries.korean = korean.queries;
   return {
     status: korean.hadFailure ? 'PARTIAL_SUCCESS' : 'SUCCESS',
     stages: { imageAnalysis: 'SUCCESS', finalJudgment: 'SUCCESS' },
-    candidates: korean.candidates,
+    candidates: judgedCandidates,
     analysis,
     ...(korean.hadFailure ? { failureStage: 'finalJudgment' as const, failureReason: 'UPSTREAM_ERROR' as const } : {}),
   };

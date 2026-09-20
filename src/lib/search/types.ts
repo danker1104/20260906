@@ -25,6 +25,7 @@ export interface ResearchBundle {
   lensMatches: LensMatch[];
   candidateSeeds: string[];
   koreanResults?: WebSearchResult[];
+  koreanTitleCandidates?: string[];
 }
 
 export interface ResearchProviders {
