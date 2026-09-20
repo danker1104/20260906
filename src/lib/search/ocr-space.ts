@@ -23,7 +23,8 @@ function cleanOcrText(text: string): string {
 function isUsefulJapaneseText(text: string): boolean {
   const normalized = cleanOcrText(text);
   const meaningful = normalized.replace(/[^\p{L}\p{N}]/gu, '');
-  if (meaningful.length < 2 || /^\d+$/u.test(meaningful)) return false;
+  if (meaningful.length < 3 || /^\d+$/u.test(meaningful)) return false;
+  if (/^[ぁ-ゖァ-ヺー]+$/u.test(meaningful) && meaningful.length < 3) return false;
   return /[\u3040-\u30ff\u3400-\u9fff]/u.test(meaningful);
 }
 
@@ -48,9 +49,6 @@ export async function extractJapaneseText(image: PreparedImage): Promise<OcrExtr
       body: formData,
     });
     const responseData = await readJson(response);
-    const responseRecord = responseData && typeof responseData === 'object'
-      ? responseData as Record<string, unknown>
-      : {};
     const parsed = ocrResponseSchema.safeParse(responseData);
     if (!response.ok || !parsed.success || parsed.data.IsErroredOnProcessing === true || parsed.data.IsErroredOnProcessing === 'true') {
       throw new ExternalProviderError('OCR_SPACE_ERROR');
@@ -61,6 +59,10 @@ export async function extractJapaneseText(image: PreparedImage): Promise<OcrExtr
       .filter(Boolean)
       .join('\n');
     const text = cleanOcrText(rawText);
+    if (process.env.NODE_ENV !== 'production') {
+      console.info('[OCR TEXT]', text);
+      console.info('[OCR USEFUL]', isUsefulJapaneseText(text));
+    }
     return { text, valid: isUsefulJapaneseText(text) };
   } catch (error) {
     if (!(error instanceof ExternalProviderError)) {

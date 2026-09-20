@@ -38,6 +38,32 @@ describe('external manga research pipeline', () => {
 
     expect(cleaned).toBe('葬送 の フリーレン');
     expect(isUsefulJapaneseText(cleaned)).toBe(true);
+    expect(isUsefulJapaneseText('え')).toBe(false);
+  });
+
+  it('uses Lens visual matches as candidates when OCR has no useful text', async () => {
+    let lensCalls = 0;
+    let judgedBundle: import('../../src/lib/search/types').ResearchBundle | undefined;
+    const result = await runIdentifyPipeline([preparedImage], {
+      ocr: async () => ({ text: 'え', valid: false }),
+      lens: async () => {
+        lensCalls += 1;
+        return [{ title: '薫る花は凛と咲く 第15話', source: 'Example', link: 'https://example.com/lens' }];
+      },
+      tavily: async (query) => query.includes('한국')
+        ? [{ title: '향기로운 꽃은 늠름하게 핀다', url: 'https://www.yes24.com/work', content: '정발 판매', score: 0.9 }]
+        : [{ title: '薫る花は凛と咲く 漫画', url: 'https://example.com/work', content: '薫る花は凛と咲く', score: 0.9 }],
+      judge: async (bundle) => {
+        judgedBundle = bundle;
+        return [candidate];
+      },
+    });
+
+    expect(lensCalls).toBe(1);
+    expect(judgedBundle?.lensMatches[0]?.title).toContain('薫る花');
+    expect(judgedBundle?.candidateSeeds.join(' ')).toContain('薫る花');
+    expect(judgedBundle?.koreanResults?.length).toBeGreaterThan(0);
+    expect(result.status).toBe('SUCCESS');
   });
 
   it('uses Tavily after valid OCR and skips Lens', async () => {

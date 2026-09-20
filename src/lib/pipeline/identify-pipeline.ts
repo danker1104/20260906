@@ -90,7 +90,9 @@ async function runLensFallback(
   providers: ResearchProviders,
   images: PreparedImage[],
   deadlineAt: number,
+  reason: 'NO_USEFUL_OCR' | 'NO_RELEVANT_TAVILY',
 ): Promise<LensMatch[]> {
+  if (process.env.NODE_ENV !== 'production') console.info('[LENS FALLBACK]', { reason });
   assertDeadline(deadlineAt);
   try {
     const matches = await providers.lens(selectLensImage(images));
@@ -119,9 +121,15 @@ function buildAnalysis(ocrTexts: string[], queries: string[], lensMatches: LensM
 }
 
 function candidateSeeds(tavilyResults: WebSearchResult[], lensMatches: LensMatch[]): string[] {
+  const lensCandidateClues = uniqueBy(lensMatches.map((match) => match.title
+    .replace(/\s*(?:第\s*\d+\s*(?:話|巻|章)|chapter\s*\d+|episode\s*\d+).*$/iu, '')
+    .replace(/\b(?:manga|comic|official|chapter|episode)\b/giu, '')
+    .replace(/\s+/gu, ' ')
+    .trim()).filter((title) => title.length >= 2), (title) => title).slice(0, 5);
+  if (process.env.NODE_ENV !== 'production') console.info('[LENS CANDIDATES]', lensCandidateClues);
   return uniqueBy([
     ...tavilyResults.map((result) => result.title),
-    ...lensMatches.map((match) => match.title),
+    ...lensCandidateClues,
   ], (title) => title)
     .filter((title) => title.length >= 2)
     .slice(0, 10);
@@ -153,12 +161,6 @@ function normalizeCandidates(candidates: Candidate[]): Candidate[] {
 function extractJapaneseTitle(value: string): string {
   const parts = value.match(/[\u3040-\u30ff\u3400-\u9fff][\u3040-\u30ff\u3400-\u9fff\s・「」『』]{1,}/gu) ?? [];
   return parts.join(' ').replace(/[「」『』]/gu, '').replace(/\s+/gu, ' ').trim().slice(0, 80);
-}
-
-function extractRomanizedClues(values: string[]): string[] {
-  return uniqueBy(values.flatMap((value) => value.match(/[A-Za-z][A-Za-z\s'-]{2,}/g) ?? []), (value) => value)
-    .filter((value) => !/^(manga|comic|comics|shonen|magazine|official)$/iu.test(value.trim()))
-    .slice(0, 2);
 }
 
 async function enrichKoreanInformation(
@@ -296,7 +298,12 @@ export async function runIdentifyPipeline(
     : uniqueTavilyResults;
 
   if (ocrTexts.length === 0 || relevantTavilyResults.length === 0) {
-    lensMatches = await runLensFallback(providers, images, deadlineAt);
+    lensMatches = await runLensFallback(
+      providers,
+      images,
+      deadlineAt,
+      ocrTexts.length === 0 ? 'NO_USEFUL_OCR' : 'NO_RELEVANT_TAVILY',
+    );
     if (lensMatches.length > 0) {
       const lensQueries = toJapaneseQueries([], lensMatches);
       queries = [...queries, ...lensQueries];
@@ -306,10 +313,12 @@ export async function runIdentifyPipeline(
         ? uniqueTavilyResults.filter((result) => hasRelevantResult(result, [...ocrTexts, ...lensMatches.map((match) => match.title)]))
         : uniqueTavilyResults;
     }
-  } else {
   }
 
   const seeds = candidateSeeds(relevantTavilyResults, lensMatches);
+  if (process.env.NODE_ENV !== 'production') {
+    console.info('[IDENTIFICATION PATH]', lensMatches.length > 0 ? 'LENS_TAVILY_FOUNDRY' : 'OCR_TAVILY_FOUNDRY');
+  }
   const analysis = buildAnalysis(ocrTexts, queries, lensMatches);
 
   if (seeds.length === 0) {
