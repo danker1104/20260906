@@ -137,6 +137,14 @@ interface Candidate {
 	evidence: EvidenceCode[];
 	author: string | null;
 	koreanInvestigationStatus: StageStatus;
+	yes24?: {
+		matched: boolean;
+		itemId?: string;
+		title?: string;
+		coverUrl?: string;
+		productUrl?: string;
+		publisher?: string;
+	};
 }
 
 interface IdentifyResponse {
@@ -451,6 +459,7 @@ API Management
 AZURE_FOUNDRY_ENDPOINT
 AZURE_FOUNDRY_API_KEY
 AZURE_FOUNDRY_MODEL
+YES24_API_KEY
 AZURE_FOUNDRY_STAGE_TIMEOUT_MS=12000
 AI_TOTAL_TIMEOUT_MS=60000
 AI_INTER_CALL_DELAY_MS=5000

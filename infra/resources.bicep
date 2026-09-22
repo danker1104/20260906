@@ -158,6 +158,11 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
           keyVaultUrl: '${keyVault.properties.vaultUri}secrets/serpapi-api-key'
           identity: managedIdentity.id
         }
+        {
+          name: 'yes24-api-key'
+          keyVaultUrl: '${keyVault.properties.vaultUri}secrets/yes24-api-key'
+          identity: managedIdentity.id
+        }
       ]
       ingress: {
         external: true
@@ -209,6 +214,10 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             {
               name: 'SERPAPI_API_KEY'
               secretRef: 'serpapi-api-key'
+            }
+            {
+              name: 'YES24_API_KEY'
+              secretRef: 'yes24-api-key'
             }
           ]
         }

@@ -52,6 +52,19 @@ export function ResultPanel({ result }: ResultPanelProps) {
                   <div className="badge-row"><span>{titleStatusLabels[candidate.koreanTitleStatus]}</span><span>{publicationLabels[candidate.publicationStatus]}</span></div>
                 </section>
               )}
+              {candidate.yes24?.matched && candidate.yes24.coverUrl && candidate.yes24.productUrl && (
+                <aside className="yes24-card" aria-label="YES24 한국판 도서 정보">
+                  <a className="yes24-cover-link" href={candidate.yes24.productUrl} target="_blank" rel="noopener noreferrer" aria-label={`${candidate.yes24.title ?? candidate.koreanTitle ?? '한국판 도서'} YES24에서 보기`}>
+                    <img className="yes24-cover" src={candidate.yes24.coverUrl} alt={`${candidate.yes24.title ?? candidate.koreanTitle ?? '한국판 도서'} 표지`} loading="lazy" />
+                  </a>
+                  <div className="yes24-copy">
+                    <span className="yes24-source">YES24</span>
+                    <h4>{candidate.yes24.title ?? candidate.koreanTitle}</h4>
+                    {candidate.yes24.publisher && <p>{candidate.yes24.publisher}</p>}
+                    <a className="yes24-product-link" href={candidate.yes24.productUrl} target="_blank" rel="noopener noreferrer">YES24에서 보기 <span aria-hidden="true">↗</span></a>
+                  </div>
+                </aside>
+              )}
             </div>
           </article>
         ))}

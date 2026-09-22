@@ -6,6 +6,7 @@ import { isQuotaError } from './stage-utils';
 import { extractJapaneseText } from '../search/ocr-space';
 import { searchTavily } from '../search/tavily';
 import { searchGoogleLens } from '../search/serpapi';
+import { enrichCandidateWithYes24 } from '../search/yes24';
 import type { EvidenceCluster, LensDiagnostic, LensMatch, OcrExtraction, ResearchBundle, ResearchProviders, WebSearchResult } from '../search/types';
 import { ExternalProviderError, uniqueBy } from '../search/provider-utils';
 import { buildRefinedJapaneseQueries, refineOcrQueries } from '../search/query-refinement';
@@ -353,6 +354,10 @@ function preserveKoreanInvestigationStatus(candidates: Candidate[], investigated
     ));
     return investigated ? { ...candidate, koreanInvestigationStatus: investigated.koreanInvestigationStatus } : candidate;
   });
+}
+
+async function enrichYes24(candidates: Candidate[]): Promise<Candidate[]> {
+  return Promise.all(candidates.map((candidate) => enrichCandidateWithYes24(candidate)));
 }
 
 function extractJapaneseTitle(value: string): string {
@@ -712,10 +717,11 @@ export async function runIdentifyPipeline(
     assertDeadline(deadlineAt);
   } catch (error) {
     if (error instanceof RequestDeadlineError) throw error;
+    const partialCandidates = await enrichYes24(selectSingleCandidate(korean.candidates));
     return {
       status: 'PARTIAL_SUCCESS',
       stages: { imageAnalysis: 'SUCCESS', finalJudgment: 'FAILED' },
-      candidates: selectSingleCandidate(korean.candidates),
+      candidates: partialCandidates,
       analysis,
       verificationStatus: getVerificationStatus(error),
       failureStage: 'finalJudgment',
@@ -767,10 +773,11 @@ export async function runIdentifyPipeline(
     }
   }
 
+  const selectedCandidates = await enrichYes24(selectSingleCandidate(preserveKoreanInvestigationStatus(judgedCandidates, korean.candidates)));
   return {
     status: canonicalFailure || korean.hadFailure || reverseSearchFailed ? 'PARTIAL_SUCCESS' : 'SUCCESS',
     stages: { imageAnalysis: 'SUCCESS', finalJudgment: 'SUCCESS' },
-    candidates: selectSingleCandidate(preserveKoreanInvestigationStatus(judgedCandidates, korean.candidates)),
+    candidates: selectedCandidates,
     analysis,
     ...(canonicalFailure || korean.hadFailure || reverseSearchFailed ? { failureStage: 'finalJudgment' as const, failureReason: 'UPSTREAM_ERROR' as const } : {}),
   };

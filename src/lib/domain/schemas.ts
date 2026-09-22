@@ -20,6 +20,14 @@ export const candidateSchema = z.object({
   evidence: z.array(z.enum(evidenceCodes)).min(1).max(5),
   author: z.string().min(1).nullable(),
   koreanInvestigationStatus: z.enum(stageStatuses),
+  yes24: z.object({
+    matched: z.boolean(),
+    itemId: z.string().min(1).optional(),
+    title: z.string().min(1).optional(),
+    coverUrl: z.string().url().optional(),
+    productUrl: z.string().url().optional(),
+    publisher: z.string().min(1).optional(),
+  }).optional(),
 });
 
 export const identifyResponseSchema = z.object({

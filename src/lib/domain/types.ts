@@ -70,6 +70,16 @@ export interface Candidate {
   evidence: EvidenceCode[];
   author: string | null;
   koreanInvestigationStatus: StageStatus;
+  yes24?: Yes24Enrichment;
+}
+
+export interface Yes24Enrichment {
+  matched: boolean;
+  itemId?: string;
+  title?: string;
+  coverUrl?: string;
+  productUrl?: string;
+  publisher?: string;
 }
 
 export interface IdentifyResponse {
