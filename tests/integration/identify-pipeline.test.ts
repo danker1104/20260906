@@ -148,6 +148,36 @@ describe('external manga research pipeline', () => {
     expect(result.candidates[0]?.koreanInvestigationStatus).toBe('SUCCESS');
   });
 
+  it('reverse-searches a translated title and promotes it to COMMON with repeated work-linked evidence', async () => {
+    let judgmentCalls = 0;
+    const queries: string[] = [];
+    const result = await runIdentifyPipeline([preparedImage], providers({
+      ocr: async () => ({ text: '作品名', valid: true }),
+      refineOcr: async (rawText) => ({ rawText, titleCandidates: ['作品名'], dialogueCandidates: [], noise: [], queryType: 'TITLE' }),
+      tavily: async (query) => {
+        queries.push(query);
+        if (query.includes('한국')) return [{ title: '作品名', url: 'https://jp.example/work', content: '作品名', score: 0.9 }];
+        if (query.includes('translated-title')) return [
+          { title: 'translated-title 作品名', url: 'https://community.example/one', content: 'translated-title 作品名', score: 0.9 },
+          { title: 'translated-title 作品名', url: 'https://blog.example/two', content: 'translated-title 作品名', score: 0.8 },
+        ];
+        return [{ title: '作品名 漫画', url: 'https://jp.example/work', content: '作品名', score: 0.9 }];
+      },
+      judge: async () => {
+        judgmentCalls += 1;
+        if (judgmentCalls === 1) return [{ ...candidate, japaneseTitle: '作品名', koreanTitle: null, koreanTitleStatus: 'UNKNOWN' as const, publicationStatus: 'UNKNOWN' as const, koreanInvestigationStatus: 'SKIPPED' as const }];
+        if (judgmentCalls === 2) return [{ ...candidate, japaneseTitle: '作品名', koreanTitle: 'translated-title', koreanTitleStatus: 'TRANSLATED' as const, publicationStatus: 'UNKNOWN' as const, koreanInvestigationStatus: 'SUCCESS' as const }];
+        return [{ ...candidate, japaneseTitle: '作品名', koreanTitle: 'translated-title', koreanTitleStatus: 'COMMON' as const, publicationStatus: 'UNKNOWN' as const, koreanInvestigationStatus: 'SUCCESS' as const }];
+      },
+    }));
+
+    expect(judgmentCalls).toBe(3);
+    expect(queries).toContain('"translated-title" "作品名"');
+    expect(result.candidates[0]?.koreanTitle).toBe('translated-title');
+    expect(result.candidates[0]?.koreanTitleStatus).toBe('COMMON');
+    expect(result.candidates[0]?.koreanInvestigationStatus).toBe('SUCCESS');
+  });
+
   it('stops before provider work when the request deadline has expired', async () => {
     let ocrCalls = 0;
     await expect(runIdentifyPipeline([preparedImage], providers({

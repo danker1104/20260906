@@ -80,6 +80,7 @@ async function validateAndPrepareImage(file: File): Promise<PreparedImage> {
       mimeType: detectedMimeType,
       width,
       height,
+      originalSize: file.size,
     };
   } catch (error) {
     if (error instanceof ImageValidationError) {
@@ -100,8 +101,8 @@ export async function validateAndPrepareImages(files: File[]): Promise<PreparedI
   const preparedImages: PreparedImage[] = [];
 
   try {
-    for (const file of files) {
-      preparedImages.push(await validateAndPrepareImage(file));
+    for (const [imageIndex, file] of files.entries()) {
+      preparedImages.push({ ...(await validateAndPrepareImage(file)), imageIndex });
     }
 
     return preparedImages;

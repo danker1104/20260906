@@ -43,7 +43,7 @@ describe('external manga research pipeline', () => {
 
   it('uses Lens visual matches as candidates when OCR has no useful text', async () => {
     let lensCalls = 0;
-    let judgedBundle: import('../../src/lib/search/types').ResearchBundle | undefined;
+    const judgedBundles: import('../../src/lib/search/types').ResearchBundle[] = [];
     const result = await runIdentifyPipeline([preparedImage], {
       ocr: async () => ({ text: 'え', valid: false }),
       lens: async () => {
@@ -54,15 +54,18 @@ describe('external manga research pipeline', () => {
         ? [{ title: '향기로운 꽃은 늠름하게 핀다', url: 'https://www.yes24.com/work', content: '정발 판매', score: 0.9 }]
         : [{ title: '薫る花は凛と咲く 漫画', url: 'https://example.com/work', content: '薫る花は凛と咲く', score: 0.9 }],
       judge: async (bundle) => {
-        judgedBundle = bundle;
+        judgedBundles.push(bundle);
         return [candidate];
       },
     });
 
     expect(lensCalls).toBe(1);
-    expect(judgedBundle?.lensMatches[0]?.title).toContain('薫る花');
-    expect(judgedBundle?.candidateSeeds.join(' ')).toContain('薫る花');
-    expect(judgedBundle?.koreanResults?.length).toBeGreaterThan(0);
+    expect(judgedBundles[0]?.lensMatches[0]?.title).toContain('薫る花');
+    expect(judgedBundles[0]?.candidateSeeds.join(' ')).toContain('薫る花');
+    expect(judgedBundles[1]?.ocrTexts).toEqual(['作品名']);
+    expect(judgedBundles[1]?.candidateSeeds).toEqual(['作品名']);
+    expect(judgedBundles[1]?.lensMatches).toEqual([]);
+    expect(judgedBundles[1]?.koreanResults?.length).toBeGreaterThan(0);
     expect(result.status).toBe('SUCCESS');
   });
 

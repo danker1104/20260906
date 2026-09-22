@@ -123,4 +123,81 @@ describe('Foundry Korean verifier response handling', () => {
     expect(result.data?.[0]?.koreanTitle).toBe('community-title');
     expect(result.data?.[0]?.koreanTitleStatus).toBe('COMMON');
   });
+
+  it('uses canonicalJapaneseTitle instead of a related-content detectedTitle', async () => {
+    vi.stubEnv('AZURE_FOUNDRY_MODEL', 'manga-judge');
+    const gateway: AzureFoundryGateway = {
+      generateContent: vi.fn(async () => JSON.stringify({
+        candidates: [{
+          rank: 1,
+          detectedTitle: '작품명 30주년 원화집 인터뷰집',
+          contentType: 'ANNIVERSARY_BOOK',
+          canonicalJapaneseTitle: '作品名',
+          relatedMangaCandidates: ['作品名'],
+          reason: 'The evidence identifies an anniversary artbook based on the original manga.',
+          japaneseTitle: '작품명 30주년 원화집 인터뷰집',
+          pronunciation: null,
+          koreanTitle: null,
+          koreanTitleStatus: 'UNKNOWN',
+          publicationStatus: 'UNKNOWN',
+          confidence: 'HIGH',
+          evidence: ['WORK_TITLE_MATCH', 'SEARCH_CONSISTENCY'],
+          author: null,
+          koreanInvestigationStatus: 'SKIPPED',
+        }],
+      })),
+    };
+
+    const result = await finalJudgment(gateway, {
+      ocrTexts: ['作品名 30周年 原画集'],
+      tavilyResults: [{ title: '作品名 30周年 原画集 インタビュー集', url: 'https://example.com/book', content: '作品名を原作とする関連書籍', score: 0.9 }],
+      lensMatches: [],
+      candidateSeeds: ['作品名 30周年 原画集 インタビュー集'],
+    });
+
+    expect(result.status).toBe('SUCCESS');
+    expect(result.data?.[0]?.japaneseTitle).toBe('作品名');
+  });
+
+  it.each([
+    'MANGA',
+    'MANGA_VOLUME',
+    'ARTBOOK',
+    'FANBOOK',
+    'INTERVIEW_BOOK',
+    'ANNIVERSARY_BOOK',
+    'NOVEL',
+    'ARTICLE',
+    'FANART',
+    'SNS_POST',
+    'MERCHANDISE',
+  ] as const)('keeps the original title separate for %s related content', async (contentType) => {
+    vi.stubEnv('AZURE_FOUNDRY_MODEL', 'manga-judge');
+    const gateway: AzureFoundryGateway = {
+      generateContent: vi.fn(async () => JSON.stringify({
+        candidates: [{
+          rank: 1,
+          detectedTitle: `related-${contentType}`,
+          contentType,
+          canonicalJapaneseTitle: '作品名',
+          relatedMangaCandidates: ['作品名'],
+          reason: 'The supplied evidence links the related item to the original manga.',
+          pronunciation: null,
+          confidence: 'MEDIUM',
+          evidence: ['WORK_TITLE_MATCH'],
+          author: null,
+        }],
+      })),
+    };
+
+    const result = await finalJudgment(gateway, {
+      ocrTexts: ['作品名'],
+      tavilyResults: [{ title: `related-${contentType}`, url: 'https://example.com/item', content: 'works based on 作品名', score: 0.8 }],
+      lensMatches: [],
+      candidateSeeds: [`related-${contentType}`],
+    });
+
+    expect(result.status).toBe('SUCCESS');
+    expect(result.data?.[0]?.japaneseTitle).toBe('作品名');
+  });
 });

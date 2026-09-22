@@ -16,6 +16,18 @@ COMMON은 정식 출판이 없어도 서로 독립된 여러 한국 웹 출처�
 OFFICIAL과 COMMON evidence가 모두 없을 때만 직접 번역을 반환할 수 있으며, 그 경우 koreanTitleStatus는 TRANSLATED로 표시한다.
 `;
 
+export const canonicalResolverSystemPrompt = `
+너는 일본 만화 검색 evidence에서 원작 만화의 canonical 일본어 제목을 판별하는 Canonical Manga Title Resolver다.
+  검색 결과의 첫 번째 후보나 단일 결과를 자동으로 선택하지 말고, candidateClusters를 비교하여 반복되는 manga signal과 독립 source를 우선 평가한다.
+  Lens-derived evidence와 Tavily-derived evidence를 구분하고, 같은 query/entity에서 파생된 Tavily 결과의 개수만으로 confidence를 높이지 않는다.
+  AI chatbot, generic app/service, Pinterest collection, download page 같은 non-manga signal이 있어도 다른 cluster의 반복 manga evidence를 먼저 비교한다.
+검색 결과의 전체 제목을 그대로 원작 만화 제목으로 복사하지 않는다.
+기념책, 원화집, 화집, 인터뷰집, 팬북, 특정 권, 상품, 기사, SNS 게시물, 팬아트는 원작 만화와 별개의 related content다.
+detectedTitle과 canonicalJapaneseTitle은 서로 다른 값일 수 있다. evidence가 related content를 가리키면 contentType을 분류하고 원작 만화 evidence가 있을 때만 canonicalJapaneseTitle을 반환한다.
+원작 만화를 식별할 수 없으면 canonicalJapaneseTitle은 null을 반환한다. 빈 문자열은 절대 반환하지 않는다.
+모델 자신의 기억으로 제목을 만들지 말고 제공된 evidence만 사용한다. 문자열에서 周年, 原画集, インタビュー 등을 단순 삭제해 제목을 만들지 않는다.
+`;
+
 export const finalJudgmentPrompt = (research: unknown): string => `
 Use only the verified OCR text, Tavily web results, Google Lens visual matches, Japanese candidate seeds, and Korean title/release evidence below.
 Compare evidence across sources; do not treat a single Lens result as proof.
@@ -40,6 +52,39 @@ Return JSON only:
   }]
 }
 Research data:
+${JSON.stringify(research)}
+`;
+
+export const canonicalResolverPrompt = (research: unknown): string => `
+You are the Canonical Manga Title Resolver. Use only the supplied OCR text, Tavily results, Google Lens matches, and candidate seeds.
+  Compare candidateClusters before selecting a title. Prefer repeated manga signals across independent sources over the first result or raw result count.
+  Treat Lens-derived and Tavily-derived evidence separately, and discount Tavily results that appear to be amplification of one query or entity.
+  Do not let a non-manga cluster such as an AI chatbot, generic app/service, Pinterest collection, or download page suppress a separate cluster with repeated manga evidence.
+The detected title and the canonical Japanese manga title are different concepts.
+First classify what the evidence actually refers to. A result may be the original manga, a volume, artbook, fanbook, interview book, anniversary book, novel, anime, article, fanart, SNS post, merchandise, or another related item.
+If the evidence refers to related content, identify the original manga that the content is based on only when the supplied evidence supports that relationship.
+Do not use your memory to invent a canonical title. Do not remove words such as 周年, 原画集, インタビュー, ファンブック, or volume markers by string trimming. These are content-type signals, not automatic deletion rules.
+The canonicalJapaneseTitle must be the original manga title, not the full related-content title. When the evidence cannot establish the original manga, return the detected title with contentType UNKNOWN and low confidence, set canonicalJapaneseTitle to null, and never use an empty string.
+Return JSON only:
+{
+  "candidates": [{
+    "rank": 1 | 2 | 3,
+    "detectedTitle": string,
+    "contentType": "MANGA" | "MANGA_VOLUME" | "ARTBOOK" | "FANBOOK" | "INTERVIEW_BOOK" | "ANNIVERSARY_BOOK" | "NOVEL" | "ANIME" | "ARTICLE" | "FANART" | "SNS_POST" | "MERCHANDISE" | "OTHER" | "UNKNOWN",
+    "canonicalJapaneseTitle": string | null,
+    "relatedMangaCandidates": string[],
+    "reason": string,
+    "pronunciation": string | null,
+    "koreanTitle": null,
+    "koreanTitleStatus": "UNKNOWN",
+    "publicationStatus": "UNKNOWN",
+    "confidence": "HIGH" | "MEDIUM" | "LOW",
+    "evidence": ["DIALOGUE_MATCH" | "CHARACTER_NAME_MATCH" | "WORK_TITLE_MATCH" | "AUTHOR_MATCH" | "PUBLISHER_MATCH" | "SERIALIZATION_MATCH" | "VISUAL_CLUE_MATCH" | "SEARCH_CONSISTENCY"],
+    "author": string | null,
+    "koreanInvestigationStatus": "SKIPPED"
+  }]
+}
+Evidence:
 ${JSON.stringify(research)}
 `;
 

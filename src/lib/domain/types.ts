@@ -17,6 +17,24 @@ export type Confidence = (typeof confidenceLevels)[number];
 export const koreanTitleStatuses = ['OFFICIAL', 'COMMON', 'TRANSLATED', 'UNKNOWN'] as const;
 export type KoreanTitleStatus = (typeof koreanTitleStatuses)[number];
 
+export const contentTypes = [
+  'MANGA',
+  'MANGA_VOLUME',
+  'ARTBOOK',
+  'FANBOOK',
+  'INTERVIEW_BOOK',
+  'ANNIVERSARY_BOOK',
+  'NOVEL',
+  'ANIME',
+  'ARTICLE',
+  'FANART',
+  'SNS_POST',
+  'MERCHANDISE',
+  'OTHER',
+  'UNKNOWN',
+] as const;
+export type ContentType = (typeof contentTypes)[number];
+
 export const publicationStatuses = ['CONFIRMED', 'NOT_FOUND', 'UNKNOWN'] as const;
 export type PublicationStatus = (typeof publicationStatuses)[number];
 
@@ -105,6 +123,8 @@ export interface PreparedImage {
   mimeType: SupportedImageMimeType;
   width: number;
   height: number;
+  originalSize?: number;
+  imageIndex?: number;
 }
 
 export interface SearchGroundingResult {
