@@ -183,7 +183,10 @@ export async function finalJudgment(
     if (candidates.length === 0) return { status: 'INSUFFICIENT', data: [], verificationStatus: 'INSUFFICIENT_EVIDENCE' };
     return { status: 'SUCCESS', data: candidates, verificationStatus: 'VERIFIED' };
   } catch (error) {
-    if (error instanceof StageExecutionError) return { status: error.reason === 'TIMEOUT' ? 'TIMEOUT' : 'FAILED', failureReason: error.reason };
+    if (error instanceof StageExecutionError) {
+      console.error(JSON.stringify({ event: 'azure_foundry_stage_error', stage: 'finalJudgment', reason: error.reason }));
+      return { status: error.reason === 'TIMEOUT' ? 'TIMEOUT' : 'FAILED', failureReason: error.reason };
+    }
     console.error(JSON.stringify({ event: 'azure_foundry_stage_error', stage: 'finalJudgment', reason: classifyUpstreamError(error) }));
     return { status: 'FAILED', failureReason: 'UPSTREAM_ERROR', verificationStatus: 'AI_UNAVAILABLE' };
   }
