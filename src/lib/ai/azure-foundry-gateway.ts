@@ -63,8 +63,17 @@ class FoundryChatCompletionsGateway implements AzureFoundryGateway {
 export function createAzureFoundryGateway(): AzureFoundryGateway {
   const endpoint = process.env.AZURE_FOUNDRY_ENDPOINT;
   const apiKey = process.env.AZURE_FOUNDRY_API_KEY;
+  const model = process.env.AZURE_FOUNDRY_MODEL;
 
-  if (!endpoint || !apiKey || !process.env.AZURE_FOUNDRY_MODEL) throw new AzureFoundryConfigurationError();
+  if (!endpoint || !apiKey || !model) {
+    console.error(JSON.stringify({
+      event: 'azure_foundry_config_missing',
+      hasEndpoint: Boolean(endpoint),
+      hasApiKey: Boolean(apiKey),
+      hasModel: Boolean(model),
+    }));
+    throw new AzureFoundryConfigurationError();
+  }
 
   return new FoundryChatCompletionsGateway(endpoint, apiKey);
 }
