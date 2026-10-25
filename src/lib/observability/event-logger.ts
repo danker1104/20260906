@@ -4,6 +4,8 @@ export type IdentifyEventName =
   | 'stage_started'
   | 'stage_completed'
   | 'stage_failed'
+  | 'search_diagnostic'
+  | 'link_delivery_checked'
   | 'identify_completed';
 
 interface IdentifyEvent {
@@ -15,6 +17,10 @@ interface IdentifyEvent {
   model?: string;
   imageCount?: number;
   outcome?: string;
+  diagnosticCode?: string;
+  namuWikiCount?: number;
+  yes24Count?: number;
+  yes24CoverCount?: number;
 }
 
 export function logIdentifyEvent(event: IdentifyEvent): void {

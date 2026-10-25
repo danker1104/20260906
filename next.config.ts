@@ -4,7 +4,7 @@ import { PHASE_DEVELOPMENT_SERVER } from 'next/constants';
 export default function nextConfig(phase: string): NextConfig {
   return {
     output: 'standalone',
-    distDir: phase === PHASE_DEVELOPMENT_SERVER ? '.next-dev' : '.next',
+    distDir: process.env.NEXT_DIST_DIR ?? (phase === PHASE_DEVELOPMENT_SERVER ? '.next-dev' : '.next'),
     turbopack: {
       rules: {
         '*.wgsl': {

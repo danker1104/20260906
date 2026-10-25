@@ -18,6 +18,21 @@ param apimPublisherName string = 'MangaFind'
 @description('Azure Foundry model endpoint used by the server-side judge.')
 param azureFoundryEndpoint string = ''
 
+@description('National Library provider mode. Keep mock until the Seoji API key is verified.')
+@allowed([
+  'mock'
+  'live'
+])
+param nlApiMode string = 'mock'
+
+@description('Optional Key Vault secret name for the National Library Seoji API key.')
+param nlApiKeySecretName string = ''
+
+@description('In-memory National Library result cache lifetime in milliseconds.')
+@minValue(0)
+@maxValue(3600000)
+param nlApiCacheTtlMs int = 60000
+
 var resourceGroupName = 'rg-${environmentName}'
 
 resource resourceGroup 'Microsoft.Resources/resourceGroups@2022-09-01' = {
@@ -34,6 +49,9 @@ module resources './resources.bicep' = {
     apimPublisherEmail: apimPublisherEmail
     apimPublisherName: apimPublisherName
     azureFoundryEndpoint: azureFoundryEndpoint
+    nlApiMode: nlApiMode
+    nlApiKeySecretName: nlApiKeySecretName
+    nlApiCacheTtlMs: nlApiCacheTtlMs
   }
 }
 

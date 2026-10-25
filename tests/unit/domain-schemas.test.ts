@@ -30,6 +30,34 @@ describe('domain schemas', () => {
     expect(identifyResponseSchema.safeParse(validResponse).success).toBe(true);
   });
 
+  it('preserves the optional canonical NamuWiki URL', () => {
+    const namuWikiUrl = `https://namu.wiki/w/${encodeURIComponent('작품명(만화)')}`;
+    const response = identifyResponseSchema.parse({
+      ...validResponse,
+      candidates: [{ ...validResponse.candidates[0], namuWikiUrl }],
+    });
+    expect(response.candidates[0]?.namuWikiUrl).toBe(namuWikiUrl);
+  });
+
+  it.each([
+    'javascript:alert(1)',
+    'http://namu.wiki/w/test',
+    'https://namu.wiki.evil.example/w/test',
+    'https://user:password@namu.wiki/w/test',
+    'https://namu.wiki:8443/w/test',
+    'https://namu.wiki/Search?q=test',
+    'https://namu.wiki/w/test?token=secret',
+    'https://namu.wiki/w/test#section',
+    'https://namu.wiki/w/test%2Fcharacters',
+    'https://namu.wiki/w/%ZZ',
+    'https://namu.wiki/w/',
+  ])('rejects unsafe or noncanonical NamuWiki URLs: %s', (namuWikiUrl) => {
+    expect(identifyResponseSchema.safeParse({
+      ...validResponse,
+      candidates: [{ ...validResponse.candidates[0], namuWikiUrl }],
+    }).success).toBe(false);
+  });
+
   it('rejects more than three candidates or more than five evidence codes', () => {
     const invalid = {
       ...validResponse,

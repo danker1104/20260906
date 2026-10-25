@@ -72,6 +72,17 @@ export async function POST(request: Request): Promise<Response> {
 
     const pipelineResult = await runIdentifyPipeline(preparedImages, undefined, startedAt + getTotalTimeoutMs());
     const response = mapPipelineResponse(requestId, pipelineResult);
+    if (process.env.NODE_ENV !== 'production') {
+      logIdentifyEvent({
+        event: 'link_delivery_checked', requestId,
+        namuWikiCount: response.candidates.filter((candidate) => candidate.namuWikiUrl).length,
+        yes24Count: response.candidates.filter((candidate) => candidate.yes24?.matched && candidate.yes24.productUrl).length,
+        yes24CoverCount: response.candidates.filter((candidate) => candidate.yes24?.matched && candidate.yes24.productUrl && candidate.yes24.coverUrl).length,
+      });
+    }
+    for (const diagnosticCode of pipelineResult.diagnosticCodes ?? []) {
+      logIdentifyEvent({ event: 'search_diagnostic', requestId, diagnosticCode });
+    }
     if (pipelineResult.failureStage) {
       logIdentifyEvent({
         event: 'stage_failed',

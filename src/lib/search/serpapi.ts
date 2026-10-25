@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { PreparedImage } from '../domain/types';
 import { configuredTimeoutMs, ExternalProviderError, fetchWithTimeout, normalizeText, readJson, requiredApiKey, uniqueBy } from './provider-utils';
 import type { LensDiagnostic, LensMatch } from './types';
+import { hashImageForResearchCache, hashResearchCacheText, InMemoryTtlCache, redactCredentialText, withoutCredentialQueryParameters } from './memory-cache';
 
 const uploadResponseSchema = z.object({ image_id: z.string().min(1) });
 const TARGET_MAX_SIZE = 450 * 1024;
@@ -19,6 +20,22 @@ const lensResponseSchema = z.object({
 });
 
 type LensMatchesWithDiagnostic = LensMatch[] & { diagnostic?: LensDiagnostic };
+
+function cloneLensMatches(matches: LensMatch[]): LensMatchesWithDiagnostic {
+  const clone = matches.map((match) => ({
+    ...match,
+    title: redactCredentialText(match.title),
+    source: redactCredentialText(match.source),
+    link: withoutCredentialQueryParameters(match.link),
+    ...(match.snippet ? { snippet: redactCredentialText(match.snippet) } : {}),
+    ...(match.thumbnail ? { thumbnail: withoutCredentialQueryParameters(match.thumbnail) } : {}),
+  })) as LensMatchesWithDiagnostic;
+  const diagnostic = (matches as LensMatchesWithDiagnostic).diagnostic;
+  if (diagnostic) clone.diagnostic = { ...diagnostic };
+  return clone;
+}
+
+const lensCache = new InMemoryTtlCache<LensMatch[]>({ clone: cloneLensMatches });
 
 interface LensUploadImage {
   buffer: Buffer;
@@ -114,9 +131,9 @@ function safeThrownError(error: unknown): string | null {
   return [code, message].filter(Boolean).join(': ') || null;
 }
 
-function logLensError(stage: LensDiagnostic['stage'], httpStatus: number | null, error: unknown): void {
+function logLensError(stage: LensDiagnostic['stage'], httpStatus: number | null): void {
   if (process.env.NODE_ENV !== 'production') {
-    console.info('[LENS ERROR]', { stage, httpStatus, message: safeThrownError(error) ?? safePayloadError(error) });
+    console.info('[LENS ERROR]', { stage, httpStatus });
   }
 }
 
@@ -152,7 +169,6 @@ async function fetchLensSearch(url: URL, imageId: string, uploadStatus: number |
           elapsedMs: Date.now() - startedAt,
           hasVisualMatches,
           visualMatchCount: rawVisualMatches.length,
-          error: safePayloadError(payload),
         });
       }
       return { response, payload, rawVisualMatches, hasVisualMatches };
@@ -164,7 +180,6 @@ async function fetchLensSearch(url: URL, imageId: string, uploadStatus: number |
           attempt,
           elapsedMs,
           type: isTimeout ? 'TIMEOUT' : 'NETWORK',
-          message: safeThrownError(error),
         });
       }
       if (isTimeout && attempt < LENS_SEARCH_MAX_ATTEMPTS) continue;
@@ -176,13 +191,14 @@ async function fetchLensSearch(url: URL, imageId: string, uploadStatus: number |
         visualMatchCount: 0,
         error: safeThrownError(error),
         searchResult: isTimeout ? 'SEARCH_TIMEOUT' : 'SEARCH_ERROR',
+        failureCode: isTimeout ? 'LENS_SEARCH_TIMEOUT' : 'LENS_SEARCH_FAILED',
       });
     }
   }
   throw new Error('Lens search attempts exhausted');
 }
 
-export async function searchGoogleLens(image: PreparedImage): Promise<LensMatch[]> {
+async function searchGoogleLensUncached(image: PreparedImage): Promise<LensMatch[]> {
   const apiKey = requiredApiKey('SERPAPI_API_KEY');
   let imageId: string;
   let uploadStatus: number | null = null;
@@ -236,11 +252,10 @@ export async function searchGoogleLens(image: PreparedImage): Promise<LensMatch[
         status: uploadResponse.status,
         ok: uploadResponse.ok,
         imageIdExists: upload.success && Boolean(upload.data.image_id),
-        error: safePayloadError(uploadPayload),
       });
     }
     if (!uploadResponse.ok || !upload.success || !upload.data.image_id) {
-      logLensError('UPLOAD', uploadResponse.status, uploadPayload);
+      logLensError('UPLOAD', uploadResponse.status);
       throwLensProviderError('SERPAPI_UPLOAD_ERROR', {
         stage: 'UPLOAD',
         uploadStatus: uploadResponse.status,
@@ -248,11 +263,12 @@ export async function searchGoogleLens(image: PreparedImage): Promise<LensMatch[
         searchStatus: null,
         visualMatchCount: 0,
         error: safePayloadError(uploadPayload),
+        failureCode: 'LENS_UPLOAD_FAILED',
       });
     }
     imageId = upload.data.image_id;
   } catch (error) {
-    if (!(error instanceof ExternalProviderError)) logLensError('UPLOAD', uploadStatus, error);
+    if (!(error instanceof ExternalProviderError)) logLensError('UPLOAD', uploadStatus);
     if (error instanceof ExternalProviderError) throw error;
     throwLensProviderError('SERPAPI_UPLOAD_ERROR', {
       stage: 'UPLOAD',
@@ -261,6 +277,7 @@ export async function searchGoogleLens(image: PreparedImage): Promise<LensMatch[
       searchStatus: null,
       visualMatchCount: 0,
       error: safeThrownError(error),
+      failureCode: 'LENS_UPLOAD_FAILED',
     });
   }
 
@@ -280,10 +297,8 @@ export async function searchGoogleLens(image: PreparedImage): Promise<LensMatch[
     const hasVisualMatches = searchResult.hasVisualMatches;
     const rawVisualMatches = searchResult.rawVisualMatches;
     const parsed = lensResponseSchema.safeParse(payload);
-    if (process.env.NODE_ENV !== 'production') {
-    }
     if (!response.ok || !parsed.success) {
-      logLensError(parsed.success ? 'SEARCH' : 'PARSE', response.status, payload);
+      logLensError(parsed.success ? 'SEARCH' : 'PARSE', response.status);
       throwLensProviderError('SERPAPI_LENS_ERROR', {
         stage: parsed.success ? 'SEARCH' : 'PARSE',
         uploadStatus,
@@ -292,32 +307,44 @@ export async function searchGoogleLens(image: PreparedImage): Promise<LensMatch[
         visualMatchCount: rawVisualMatches.length,
         error: safePayloadError(payload),
         searchResult: parsed.success && rawVisualMatches.length === 0 ? 'EMPTY_RESULTS' : 'SEARCH_ERROR',
+        failureCode: 'LENS_SEARCH_FAILED',
       });
     }
 
-    const matches = uniqueBy((parsed.data.visual_matches ?? []).map((match, sourceIndex) => ({
-      title: normalizeText(match.title ?? ''),
-      source: normalizeText(match.source ?? ''),
-      link: match.link ?? '',
-      sourceIndex,
-      ...(match.thumbnail ? { thumbnail: match.thumbnail } : {}),
-    })).filter((match) => match.title && match.link), (match) => match.link).slice(0, 10);
+    const matches = uniqueBy((parsed.data.visual_matches ?? []).map((match, sourceIndex) => {
+      const metadata = match as typeof match & Record<string, unknown>;
+      const snippet = [metadata.snippet, metadata.description, metadata.text, metadata.caption, metadata.alt]
+        .find((value): value is string => typeof value === 'string' && Boolean(value.trim()));
+      const reportedPosition = metadata.position;
+      const reportedScore = typeof metadata.score === 'number' ? metadata.score : metadata.similarity;
+      return {
+        title: normalizeText(match.title ?? ''),
+        source: normalizeText(match.source ?? ''),
+        link: match.link ?? '',
+        sourceIndex,
+        position: typeof reportedPosition === 'number' && Number.isInteger(reportedPosition) && reportedPosition > 0 ? reportedPosition : sourceIndex + 1,
+        ...(snippet ? { snippet: normalizeText(snippet).slice(0, 300) } : {}),
+        ...(typeof reportedScore === 'number' && Number.isFinite(reportedScore) ? { matchScore: reportedScore } : {}),
+        ...(match.thumbnail ? { thumbnail: match.thumbnail } : {}),
+      };
+    }).filter((match) => match.link), (match) => match.link);
     if (process.env.NODE_ENV !== 'production') {
       console.info('[LENS SEARCH]', { status: response.status, visualMatchCount: rawVisualMatches.length });
-      console.info('[LENS VISUAL MATCHES]');
-      (parsed.data.visual_matches ?? []).slice(0, 10).forEach((match, index) => {
-        console.info(`${index + 1}.`, {
-          title: match.title ?? '',
-          source: match.source ?? '',
-          link: match.link ?? '',
-        });
-      });
     }
     const result = matches as LensMatchesWithDiagnostic;
-    result.diagnostic = { stage: 'COMPLETE', uploadStatus, imageIdExists: true, searchStatus, visualMatchCount: rawVisualMatches.length, error: null, searchResult: rawVisualMatches.length === 0 ? 'EMPTY_RESULTS' : 'SUCCESS' };
+    result.diagnostic = {
+      stage: 'COMPLETE',
+      uploadStatus,
+      imageIdExists: true,
+      searchStatus,
+      visualMatchCount: rawVisualMatches.length,
+      error: null,
+      searchResult: rawVisualMatches.length === 0 ? 'EMPTY_RESULTS' : 'SUCCESS',
+      ...(rawVisualMatches.length === 0 ? { failureCode: 'LENS_EMPTY_RESULTS' as const } : matches.length === 0 ? { failureCode: 'LENS_CANDIDATE_EXTRACTION_FAILED' as const } : {}),
+    };
     return result;
   } catch (error) {
-    if (!(error instanceof ExternalProviderError)) logLensError('SEARCH', searchStatus, error);
+    if (!(error instanceof ExternalProviderError)) logLensError('SEARCH', searchStatus);
     if (error instanceof ExternalProviderError) throw error;
     throwLensProviderError('SERPAPI_LENS_ERROR', {
       stage: 'SEARCH',
@@ -326,6 +353,12 @@ export async function searchGoogleLens(image: PreparedImage): Promise<LensMatch[
       searchStatus,
       visualMatchCount: 0,
       error: safeThrownError(error),
+      failureCode: 'LENS_SEARCH_FAILED',
     });
   }
+}
+
+export function searchGoogleLens(image: PreparedImage): Promise<LensMatch[]> {
+  const key = hashResearchCacheText('google-lens-ja-jp-visual-v1', hashImageForResearchCache(image));
+  return lensCache.getOrLoad(key, () => searchGoogleLensUncached(image));
 }

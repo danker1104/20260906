@@ -18,6 +18,21 @@ param apimPublisherName string
 @description('Azure Foundry model endpoint used by the server-side judge.')
 param azureFoundryEndpoint string = ''
 
+@description('National Library provider mode. Keep mock until the Seoji API key is verified.')
+@allowed([
+  'mock'
+  'live'
+])
+param nlApiMode string = 'mock'
+
+@description('Optional Key Vault secret name for the National Library Seoji API key.')
+param nlApiKeySecretName string = ''
+
+@description('In-memory National Library result cache lifetime in milliseconds.')
+@minValue(0)
+@maxValue(3600000)
+param nlApiCacheTtlMs int = 60000
+
 var containerRegistryName = toLower(replace('cr${environmentName}', '-', ''))
 var managedEnvironmentName = 'cae-${environmentName}'
 var containerAppName = 'ca-${environmentName}'
@@ -132,7 +147,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
     managedEnvironmentId: managedEnvironment.id
     configuration: {
       activeRevisionsMode: 'Single'
-      secrets: [
+      secrets: concat([
         {
           name: 'azure-foundry-api-key'
           keyVaultUrl: '${keyVault.properties.vaultUri}secrets/azure-foundry-api-key'
@@ -163,7 +178,13 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
           keyVaultUrl: '${keyVault.properties.vaultUri}secrets/yes24-api-key'
           identity: managedIdentity.id
         }
-      ]
+      ], empty(nlApiKeySecretName) ? [] : [
+        {
+          name: 'national-library-api-key'
+          keyVaultUrl: '${keyVault.properties.vaultUri}secrets/${nlApiKeySecretName}'
+          identity: managedIdentity.id
+        }
+      ])
       ingress: {
         external: true
         targetPort: 3000
@@ -186,7 +207,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             cpu: json('0.5')
             memory: '1Gi'
           }
-          env: [
+          env: concat([
             {
               name: 'NODE_ENV'
               value: 'production'
@@ -219,7 +240,20 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
               name: 'YES24_API_KEY'
               secretRef: 'yes24-api-key'
             }
-          ]
+            {
+              name: 'NL_API_MODE'
+              value: nlApiMode
+            }
+            {
+              name: 'NL_API_CACHE_TTL_MS'
+              value: string(nlApiCacheTtlMs)
+            }
+          ], empty(nlApiKeySecretName) ? [] : [
+            {
+              name: 'NL_API_KEY'
+              secretRef: 'national-library-api-key'
+            }
+          ])
         }
       ]
       scale: {

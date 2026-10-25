@@ -4,6 +4,7 @@ import { HeroMotion } from '../components/website/hero-motion';
 import { MotionReveal, ParallaxStage } from '../components/website/motion-reveal';
 import { SceneCtaLink } from '../components/website/scene-cta-link';
 import { IntroScene } from '../components/website/intro-scene';
+import { ThemeToggle } from '../components/theme/theme-toggle';
 
 const steps = [
   { number: '01', title: '캡처를 올려요', text: 'JPG, PNG, WebP 이미지를 최대 3장까지 선택하세요.' },
@@ -14,17 +15,17 @@ const steps = [
 export default async function WebsiteHomePage({
   searchParams,
 }: {
-  searchParams: Promise<{ skipIntro?: string }>;
+  searchParams: Promise<{ showIntro?: string }>;
 }) {
-  const shouldSkipIntro = (await searchParams).skipIntro === '1';
+  const shouldShowIntro = (await searchParams).showIntro === '1';
 
   return (
     <main className="site-shell">
       <a className="skip-link" href="#site-title">본문으로 건너뛰기</a>
-      {!shouldSkipIntro && <IntroScene />}
+      {shouldShowIntro && <IntroScene />}
       <header className="site-nav">
         <Link className="brand" href="/">MangaFind</Link>
-        <nav aria-label="주요 메뉴"><a href="#how-it-works">찾는 방법</a><a href="#result-example">결과 예시</a><InstallPrompt className="nav-cta" label="설치하기" /></nav>
+        <nav aria-label="주요 메뉴"><a href="#how-it-works">찾는 방법</a><a href="#result-example">결과 예시</a><Link href="/publication">출판 정보 검색</Link><ThemeToggle /><InstallPrompt className="nav-cta" label="설치하기" /></nav>
       </header>
       <section className="site-hero" aria-labelledby="site-title">
         <HeroMotion>

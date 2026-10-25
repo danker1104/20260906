@@ -83,7 +83,7 @@ Title and publication states:
 - `TRANSLATED` must be labeled as AI/reference translation in the UI.
 - `UNKNOWN` must be displayed as Korean title/publication information being unconfirmed.
 - Never present an AI translation as an official or common title.
-- Do not show search source URLs or source lists in the V1 UI; use internal evidence only.
+- Do not show general search source URLs or source lists in the V1 UI. The explicit exception is one verified NamuWiki work-document link per candidate through optional `namuWikiUrl`, selected only from existing Korean research/reverse-search results. Never invent URLs or use model-supplied URLs; omit unverified links and do not add external calls for this enrichment.
 
 ## Reliability, Security, and Privacy
 
@@ -93,7 +93,7 @@ Title and publication states:
 - Global rate limit: APIM, IP-based, 3 requests/minute and 30 requests/day; return HTTP 429 with `Retry-After`.
 - Store Azure Foundry API keys in Azure Key Vault and inject them through Managed Identity. Never put keys in source, Docker images, `.env.example`, browser bundles, logs, or chat messages.
 - Keep image buffers only inside the request context and release them in a `finally` cleanup path for success, failure, timeout, and exceptions.
-- Do not persist original images, search history, or raw search content in V1.
+- Do not durably persist original images or search history in V1. The explicitly scoped cost cache may retain structured OCR/Lens/Tavily/Foundry results in process memory only, keyed by SHA-256, for the bounded TTL and entry limit documented in `TRD.md`; never cache image bytes or credentials.
 - Remove EXIF/IPTC/XMP metadata before model transfer.
 - Do not log image bodies, raw search content, full URL lists, prompts, API keys, or personal data.
 - Use request IDs for structured logs and metrics.
@@ -214,7 +214,7 @@ Always:
 
 Ask first:
 
-- Adding authentication, a database, persistent image/result storage, queue/worker processing, or a new search provider.
+- Adding authentication, a database, durable image/result storage, queue/worker processing, or a new search provider. The bounded process-local cache already authorized in `TRD.md` is the only storage exception.
 - Changing the research-to-Foundry pipeline, model role, timeout budget, retry policy, rate limits, or public API schema.
 - Changing V1 source-display policy or title/publication state semantics.
 - Changing Azure APIM, Key Vault, Managed Identity, networking, or deployment scope.
@@ -225,4 +225,4 @@ Never:
 - Expose raw Foundry/Search output, stack traces, prompts, or secrets to users.
 - Treat AI-generated translation as an official/common title.
 - Add a retry loop that bypasses the documented timeout/cost policy.
-- Persist user images or search history without an explicit scope decision.
+- Persist original images or durable search history without an explicit scope decision; keep the approved cache process-local and TTL-bounded.

@@ -1,5 +1,9 @@
 import type { Candidate, Yes24Enrichment } from '../domain/types';
 import { fetchWithTimeout, readJson } from './provider-utils';
+import { normalizeJapaneseTitle } from './lens-candidates';
+import { detectQueryType } from '../publication/normalize';
+import { hasFullWorkTitle } from './work-title-verification';
+import type { WebSearchResult } from './types';
 
 const YES24_API_URL = 'https://apis.yes24.com/v1/goods/itemList';
 const YES24_QUERY_TIMEOUT_MS = 8_000;
@@ -9,6 +13,8 @@ interface Yes24Item {
   title: string;
   author: string;
   originalTitle: string;
+  language: string;
+  isbn: string;
   series: string;
   publisher: string;
   coverUrl: string;
@@ -59,13 +65,15 @@ function mapItem(item: Record<string, unknown>): Yes24Item | null {
   const title = firstText(item, ['title', 'goodsName', 'name']);
   const author = firstText(item, ['author', 'authors', 'writer']);
   const originalTitle = firstText(item, ['originalTitle', 'originalName']);
+  const language = firstText(item, ['language', 'languageCode', 'productLanguage']);
+  const isbn = firstText(item, ['isbn13', 'isbn', 'isbn10']);
   const series = firstText(item, ['series', 'seriesName']);
   const publisher = firstText(item, ['publisher', 'publisherName']);
   const coverUrl = absoluteHttpsUrl(firstText(item, ['cover', 'coverUrl', 'image', 'imageUrl', 'thumbnail']));
   const productUrl = absoluteHttpsUrl(firstText(item, ['productUrl', 'goodsUrl', 'url', 'link']))
     || (itemId ? `https://www.yes24.com/Product/Goods/${encodeURIComponent(itemId)}` : '');
   if (!title || !productUrl) return null;
-  return { itemId, title, author, originalTitle, series, publisher, coverUrl, productUrl };
+  return { itemId, title, author, originalTitle, language, isbn, series, publisher, coverUrl, productUrl };
 }
 
 function normalize(value: string): string {
@@ -77,7 +85,7 @@ function normalize(value: string): string {
 }
 
 function normalizeWorkTitle(value: string): string {
-  let normalized = normalize(value);
+  let normalized = normalize(value.normalize('NFKC').replace(/\s+(?:제\s*)?\d+\s*(?:권|부|화|편)?\s*$/u, ''));
   let previous = '';
   while (normalized !== previous) {
     previous = normalized;
@@ -86,9 +94,22 @@ function normalizeWorkTitle(value: string): string {
   return normalized;
 }
 
+function normalizeOriginalWorkTitle(value: string): string {
+  return normalizeJapaneseTitle(value.normalize('NFKC').replace(/\s+(?:第\s*)?\d+\s*(?:巻|권)?\s*$/u, ''));
+}
+
+function containsFullKoreanWorkTitle(reference: string, value: string): boolean {
+  const expected = normalizeWorkTitle(reference);
+  const actual = normalizeWorkTitle(value);
+  if (!/[가-힣]/u.test(reference) || expected.length < 3 || !actual.startsWith(expected)) return false;
+  const suffix = actual.slice(expected.length);
+  return (!suffix || /^[a-z0-9]+$/iu.test(suffix))
+    && !/\b(?:guide(?:book)?|fanbook|artbook|novel)\b/iu.test(value);
+}
+
 function normalizeAuthor(value: string): string {
   const normalized = normalize(value);
-  const stripped = normalized.replace(/(?:글그림|글|그림|저자|작가|지음|역자|옮김)/gu, '');
+  const stripped = normalized.replace(/(?:글그림|글|그림|저자|작가|지음|역자|옮김)$/gu, '');
   return stripped || normalized;
 }
 
@@ -118,11 +139,29 @@ function titleSimilarity(left: string, right: string): number {
   return 1 - distance / Math.max(leftCharacters.length, rightCharacters.length);
 }
 
-function titleMatches(candidate: Candidate, item: Yes24Item): boolean {
+function titleMatches(candidate: Candidate, item: Yes24Item, verifiedIsbn?: string): boolean {
+  const reject = (reason: string): false => {
+    if (process.env.NODE_ENV !== 'production') console.info('[YES24 MATCH REJECTED]', { reason });
+    return false;
+  };
+  if (item.isbn && detectQueryType(item.isbn) !== 'ISBN') return reject('INVALID_ISBN');
+  const itemIsbn = item.isbn.replace(/[\s-]/gu, '').toUpperCase();
+  if (verifiedIsbn && itemIsbn && itemIsbn !== verifiedIsbn) return reject('ISBN_CONFLICT');
+  const matchesIsbn = Boolean(verifiedIsbn && itemIsbn === verifiedIsbn);
+  if (/직수입|일본어판|일본판|일서|洋書|輸入|原書/u.test(`${item.title} ${item.series}`)
+    || /^(?:ja|jpn|japanese|日本語)$/iu.test(item.language)
+    || (/[\p{Script=Hiragana}\p{Script=Katakana}]/u.test(item.title) && !/[가-힣]/u.test(item.title))) return reject('JAPANESE_IMPORT');
   const koreanTitle = candidate.koreanTitle ?? '';
-  const itemTitles = [item.title, item.series, item.originalTitle].filter(Boolean);
+  const itemTitles = [item.title, item.series].filter(Boolean);
   const bestTitleSimilarity = Math.max(...itemTitles.map((title) => titleSimilarity(koreanTitle, title)), 0);
-  if (!koreanTitle || bestTitleSimilarity < 0.7) return false;
+  const matchesCompleteTitle = itemTitles.some((title) => containsFullKoreanWorkTitle(koreanTitle, title));
+  const hasOriginal = Boolean(item.originalTitle.trim());
+  const matchesOriginal = hasOriginal && normalizeOriginalWorkTitle(candidate.japaneseTitle) === normalizeOriginalWorkTitle(item.originalTitle);
+  if (hasOriginal && !matchesOriginal) return reject('ORIGINAL_TITLE_CONFLICT');
+  if (!matchesOriginal && !matchesIsbn && !matchesCompleteTitle
+    && (!koreanTitle || bestTitleSimilarity < 0.7)) return reject('KOREAN_TITLE_MISMATCH');
+  if (candidate.confidence !== 'HIGH' && !matchesOriginal && !matchesIsbn && !matchesCompleteTitle
+    && !itemTitles.some((title) => normalizeWorkTitle(koreanTitle) === normalizeWorkTitle(title))) return reject('LOW_CONFIDENCE_TITLE_NOT_EXACT');
   const candidateAuthor = normalizeAuthor(candidate.author ?? '');
   const itemAuthor = normalizeAuthor(item.author);
   if (!candidateAuthor || !itemAuthor) return true;
@@ -130,7 +169,7 @@ function titleMatches(candidate: Candidate, item: Yes24Item): boolean {
   if (itemAuthors.some((author) => author === candidateAuthor || author.includes(candidateAuthor) || candidateAuthor.includes(author))) return true;
   const hasDifferentWritingSystem = /[가-힣]/u.test(candidateAuthor) !== /[가-힣]/u.test(itemAuthor)
     || /[ぁ-んァ-ン一-龯]/u.test(candidateAuthor) !== /[ぁ-んァ-ン一-龯]/u.test(itemAuthor);
-  return hasDifferentWritingSystem;
+  return hasDifferentWritingSystem || reject('AUTHOR_CONFLICT');
 }
 
 function volumeRank(title: string): number {
@@ -142,7 +181,7 @@ function volumeRank(title: string): number {
 }
 
 function selectRepresentative(items: Yes24Item[]): Yes24Item | null {
-  const matched = items.filter((item) => item.coverUrl && item.productUrl);
+  const matched = items.filter((item) => item.productUrl);
   return [...matched].sort((left, right) => volumeRank(left.title) - volumeRank(right.title))[0] ?? null;
 }
 
@@ -150,19 +189,58 @@ function logSearch(query: string, resultCount: number): void {
   if (process.env.NODE_ENV !== 'production') console.info('[YES24 SEARCH]', { query, resultCount });
 }
 
-export async function enrichCandidateWithYes24(candidate: Candidate): Promise<Candidate> {
+function usePublishedKoreanTitle(candidate: Candidate, item: Yes24Item, koreanEditionVerified: boolean): Candidate {
+  if (!koreanEditionVerified || !item.originalTitle
+    || normalizeOriginalWorkTitle(item.originalTitle) !== normalizeOriginalWorkTitle(candidate.japaneseTitle)) return candidate;
+  const title = (item.series || item.title)
+    .replace(/\s*[-–—|]\s*(?:YES24|예스24).*$/iu, '')
+    .replace(/\s+(?:특별판|한정판|완전판|세트)\s*$/u, '')
+    .replace(/\s+(?:제\s*|전\s*)?\d+(?:\s*[-~〜]\s*\d+)?\s*(?:권|부|편)?(?:\s*세트)?\s*$/u, '')
+    .trim();
+  if (!/[가-힣]/u.test(title) || /[\p{Script=Hiragana}\p{Script=Katakana}]/u.test(title)) return candidate;
+  const koreanTitle = candidate.koreanTitle && containsFullKoreanWorkTitle(candidate.koreanTitle, title)
+    ? candidate.koreanTitle : title;
+  return { ...candidate, koreanTitle, koreanTitleStatus: 'OFFICIAL', publicationStatus: 'CONFIRMED' };
+}
+
+export async function enrichCandidateWithYes24(candidate: Candidate, searchResults: WebSearchResult[] = [], verifiedIsbn?: string): Promise<Candidate> {
+  const lookupIsbn = verifiedIsbn && detectQueryType(verifiedIsbn) === 'ISBN'
+    ? verifiedIsbn.replace(/[\s-]/gu, '').toUpperCase() : undefined;
   const unmatched: Yes24Enrichment = { matched: false };
-  const eligibleTitleStatus = candidate.koreanTitleStatus === 'OFFICIAL' || candidate.koreanTitleStatus === 'COMMON';
-  if (!eligibleTitleStatus || !candidate.koreanTitle) {
+  const eligibleTitleStatus = candidate.koreanTitleStatus !== 'UNKNOWN';
+  if (!eligibleTitleStatus || !candidate.koreanTitle || !candidate.japaneseTitle) {
     if (process.env.NODE_ENV !== 'production') {
       console.info('[YES24 SKIP]', {
         reason: 'CALL_CONDITION_NOT_MET',
+        confidence: candidate.confidence,
         koreanTitleStatus: candidate.koreanTitleStatus,
         publicationStatus: candidate.publicationStatus,
         hasKoreanTitle: Boolean(candidate.koreanTitle),
       });
     }
     return { ...candidate, yes24: unmatched };
+  }
+  for (const result of searchResults) {
+    try {
+      const sourceUrl = new URL(result.url);
+      const itemId = sourceUrl.pathname.match(/^\/product\/goods\/(\d+)\/?$/iu)?.[1];
+      if (sourceUrl.protocol !== 'https:' || !/^(?:www\.)?yes24\.com$/iu.test(sourceUrl.hostname)
+        || sourceUrl.username || sourceUrl.password || sourceUrl.port || !itemId
+        || !hasFullWorkTitle(result, candidate.japaneseTitle)) continue;
+      sourceUrl.search = '';
+      sourceUrl.hash = '';
+      const productUrl = sourceUrl.toString();
+      const item: Yes24Item = {
+        itemId, title: result.title.replace(/\s*[-–—|]\s*(?:YES24|예스24).*$/iu, '').trim(),
+        author: '', originalTitle: candidate.japaneseTitle, language: '', isbn: '', series: '', publisher: '', coverUrl: '', productUrl,
+      };
+      if (/직수입|일본어판|일본판|일서|洋書|輸入|原書/u.test(result.content) || !titleMatches(candidate, item)) continue;
+      const published = usePublishedKoreanTitle(candidate, item, /한국어판|정식\s*한국판|국내\s*출판|번역\s*출간/u.test(result.content));
+      if (process.env.NODE_ENV !== 'production') console.info('[YES24 REUSED SEARCH]', { reason: 'EXACT_ORIGINAL', hasProductUrl: true });
+      return { ...published, yes24: { matched: true, itemId, title: item.title, productUrl } };
+    } catch {
+      continue;
+    }
   }
   const apiKey = process.env.YES24_API_KEY?.trim();
   if (!apiKey) {
@@ -171,7 +249,7 @@ export async function enrichCandidateWithYes24(candidate: Candidate): Promise<Ca
   }
 
   const url = new URL(YES24_API_URL);
-  url.searchParams.set('query', candidate.koreanTitle);
+  url.searchParams.set('query', lookupIsbn ?? candidate.koreanTitle);
   url.searchParams.set('category', 'BOOK');
   url.searchParams.set('page', '1');
   url.searchParams.set('pageSize', '10');
@@ -184,9 +262,9 @@ export async function enrichCandidateWithYes24(candidate: Candidate): Promise<Ca
     }, YES24_QUERY_TIMEOUT_MS);
     const payload = await readJson(response);
     const items = response.ok ? unwrapItems(payload).map(mapItem).filter((item): item is Yes24Item => Boolean(item)) : [];
-    logSearch(candidate.koreanTitle, items.length);
+    logSearch(lookupIsbn ?? candidate.koreanTitle, items.length);
     if (process.env.NODE_ENV !== 'production') {
-      console.info('[YES24 CANDIDATES]', items.map((item) => ({
+      console.info('[YES24 TOP RESULTS]', items.map((item) => ({
         itemId: item.itemId || undefined,
         title: item.title,
         author: item.author || undefined,
@@ -199,9 +277,9 @@ export async function enrichCandidateWithYes24(candidate: Candidate): Promise<Ca
       if (process.env.NODE_ENV !== 'production') console.info('[YES24 ERROR]', { type: 'HTTP', status: response.status });
       return { ...candidate, yes24: unmatched };
     }
-    const representative = selectRepresentative(items.filter((item) => titleMatches(candidate, item)));
+    const representative = selectRepresentative(items.filter((item) => titleMatches(candidate, item, lookupIsbn)));
     if (!representative) {
-      if (process.env.NODE_ENV !== 'production') console.info('[YES24 MATCH]', { matched: false });
+      if (process.env.NODE_ENV !== 'production') console.info('[YES24 FINAL SELECTION]', { matched: false });
       return { ...candidate, yes24: unmatched };
     }
     const enrichment: Yes24Enrichment = {
@@ -213,7 +291,7 @@ export async function enrichCandidateWithYes24(candidate: Candidate): Promise<Ca
       ...(representative.publisher ? { publisher: representative.publisher } : {}),
     };
     if (process.env.NODE_ENV !== 'production') {
-      console.info('[YES24 MATCH]', {
+      console.info('[YES24 FINAL SELECTION]', {
         matched: true,
         itemId: representative.itemId || undefined,
         title: representative.title,
@@ -223,7 +301,7 @@ export async function enrichCandidateWithYes24(candidate: Candidate): Promise<Ca
         matchReason: 'official Korean title and compatible author/title fields',
       });
     }
-    return { ...candidate, yes24: enrichment };
+    return { ...usePublishedKoreanTitle(candidate, representative, true), yes24: enrichment };
   } catch (error) {
     if (process.env.NODE_ENV !== 'production') {
       console.info('[YES24 ERROR]', {
@@ -232,5 +310,73 @@ export async function enrichCandidateWithYes24(candidate: Candidate): Promise<Ca
       });
     }
     return { ...candidate, yes24: unmatched };
+  }
+}
+
+// --- Publication Search on-demand lookup -----------------------------------------------
+// Separate entry point for the Publication Search feature's "구매 정보 확인" button.
+// Reuses the fetch/parsing helpers above instead of a second YES24 provider. Gated by
+// NL_API_MODE so the Publication Search mock mode never performs a real YES24 call, even
+// though YES24_API_KEY may already be configured for the image-identification pipeline.
+const publicationYes24Cache = new Map<string, { expiresAt: number; value: Yes24Enrichment }>();
+const PUBLICATION_YES24_CACHE_TTL_MS = 10 * 60 * 1000;
+
+function isPublicationLiveMode(): boolean {
+  return process.env.NL_API_MODE?.trim() === 'live';
+}
+
+export interface PublicationYes24LookupParams {
+  isbn?: string | null;
+  title: string;
+  author?: string | null;
+}
+
+export async function lookupYes24ForPublication(params: PublicationYes24LookupParams): Promise<Yes24Enrichment> {
+  const cacheKey = params.isbn ? `isbn:${params.isbn}` : `title:${normalize(params.title)}:${normalize(params.author ?? '')}`;
+  const cached = publicationYes24Cache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+
+  const cacheAndReturn = (value: Yes24Enrichment): Yes24Enrichment => {
+    publicationYes24Cache.set(cacheKey, { expiresAt: Date.now() + PUBLICATION_YES24_CACHE_TTL_MS, value });
+    return value;
+  };
+
+  if (!isPublicationLiveMode()) {
+    if (process.env.NODE_ENV !== 'production') console.info('[YES24 PUBLICATION SKIP]', { reason: 'MOCK_MODE' });
+    return cacheAndReturn({ matched: false });
+  }
+
+  const apiKey = process.env.YES24_API_KEY?.trim();
+  if (!apiKey) {
+    if (process.env.NODE_ENV !== 'production') console.info('[YES24 PUBLICATION ERROR]', { type: 'CONFIG' });
+    return cacheAndReturn({ matched: false });
+  }
+
+  const url = new URL(YES24_API_URL);
+  url.searchParams.set('query', params.isbn ?? params.title);
+  url.searchParams.set('category', 'BOOK');
+  url.searchParams.set('page', '1');
+  url.searchParams.set('pageSize', '5');
+  url.searchParams.set('detail', 'Y');
+
+  try {
+    const response = await fetchWithTimeout(url, {
+      method: 'GET',
+      headers: { 'X-Api-Key': apiKey, accept: 'application/json' },
+    }, YES24_QUERY_TIMEOUT_MS);
+    const payload = await readJson(response);
+    const items = response.ok ? unwrapItems(payload).map(mapItem).filter((item): item is Yes24Item => Boolean(item)) : [];
+    const representative = items[0];
+    if (!representative) return cacheAndReturn({ matched: false });
+    return cacheAndReturn({
+      matched: true,
+      ...(representative.itemId ? { itemId: representative.itemId } : {}),
+      title: representative.title,
+      ...(representative.coverUrl ? { coverUrl: representative.coverUrl } : {}),
+      productUrl: representative.productUrl,
+      ...(representative.publisher ? { publisher: representative.publisher } : {}),
+    });
+  } catch {
+    return cacheAndReturn({ matched: false });
   }
 }

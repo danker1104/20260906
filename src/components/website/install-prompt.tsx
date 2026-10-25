@@ -34,14 +34,15 @@ export function InstallPrompt({ className = 'site-primary-cta', label = '홈 화
   }, []);
 
   if (installed) return <p className="install-status">홈 화면에 추가된 상태예요.</p>;
+  const availableInstallEvent = installEvent;
+  if (!availableInstallEvent) return null;
 
-  async function install() {
-    if (!installEvent) return;
-    await installEvent.prompt();
-    const choice = await installEvent.userChoice;
+  async function install(event: BeforeInstallPromptEvent) {
+    await event.prompt();
+    const choice = await event.userChoice;
     if (choice.outcome === 'accepted') setInstalled(true);
     setInstallEvent(null);
   }
 
-  return <button className={className} type="button" onClick={install}>{label} <span aria-hidden="true">↗</span></button>;
+  return <button className={className} type="button" onClick={() => void install(availableInstallEvent)}>{label} <span aria-hidden="true">↗</span></button>;
 }

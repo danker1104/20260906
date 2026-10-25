@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './fixtures';
 
 const onePixelPng = {
   name: 'manga.png',
@@ -45,6 +45,39 @@ test('uploads an image and renders a successful candidate', async ({ page }) => 
   await expect(page.getByText('별 아래의 그녀')).toBeVisible();
   await expect(page.getByText('국내 통용명')).toBeVisible();
 });
+
+for (const hasDocument of [true, false]) {
+  test(`NamuWiki link is ${hasDocument ? 'shown for a verified document' : 'hidden without a verified document'}`, async ({ page }, testInfo) => {
+    const namuWikiUrl = `https://namu.wiki/w/${encodeURIComponent('별 아래의 그녀')}`;
+    await page.route('**/api/identify', async (route) => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        ...successResponse,
+        candidates: [{ ...successResponse.candidates[0], ...(hasDocument ? { namuWikiUrl } : {}) }],
+      }),
+    }));
+    await page.goto('/search');
+    await page.locator('#manga-images').setInputFiles(onePixelPng);
+    await page.getByRole('button', { name: '만화 찾기' }).click();
+    await expect(page.getByRole('heading', { name: '星の下の彼女' })).toBeVisible();
+    const link = page.getByRole('link', { name: '별 아래의 그녀 나무위키에서 보기 (새 탭)' });
+    if (!hasDocument) {
+      await expect(link).toHaveCount(0);
+      return;
+    }
+    await link.scrollIntoViewIfNeeded();
+    await expect(link).toBeVisible();
+    await expect(link).toHaveAttribute('href', namuWikiUrl);
+    await expect(link).toHaveAttribute('target', '_blank');
+    await expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+    const bounds = await link.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(page.viewportSize()!.width);
+    await page.screenshot({ path: testInfo.outputPath('namuwiki-result.png'), fullPage: true });
+  });
+}
 
 test('renders a partial result without inventing Korean information', async ({ page }) => {
   await page.route('**/api/identify', async (route) => route.fulfill({

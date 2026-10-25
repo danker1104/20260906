@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { namuWikiUrlSchema } from '../validation/namuwiki';
 import {
   confidenceLevels,
   evidenceCodes,
@@ -20,6 +21,7 @@ export const candidateSchema = z.object({
   evidence: z.array(z.enum(evidenceCodes)).min(1).max(5),
   author: z.string().min(1).nullable(),
   koreanInvestigationStatus: z.enum(stageStatuses),
+  namuWikiUrl: namuWikiUrlSchema.optional(),
   yes24: z.object({
     matched: z.boolean(),
     itemId: z.string().min(1).optional(),

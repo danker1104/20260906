@@ -215,12 +215,6 @@ export function IntroScene() {
       const cosX = Math.cos(tiltX);
       const sinX = Math.sin(tiltX);
 
-      const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, baseRadius * 1.7);
-      glow.addColorStop(0, `rgba(110, 150, 240, ${(0.22 + zoom * 0.14).toFixed(3)})`);
-      glow.addColorStop(1, 'rgba(110, 150, 240, 0)');
-      ctx.fillStyle = glow;
-      ctx.fillRect(cx - baseRadius * 1.8, cy - baseRadius * 1.8, baseRadius * 3.6, baseRadius * 3.6);
-
       // Fine horizontal orbit lines give the idle sphere the same instrument-like
       // scan depth as the reference motion, without competing with the particles.
       for (let i = -2; i <= 2; i++) {
@@ -291,10 +285,7 @@ export function IntroScene() {
       // handoff to the real homepage never pops.
       const flash = smoothstep(0.86, 0.97, zoom);
       if (flash > 0) {
-        const flashGlow = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(width, height) * 0.7);
-        flashGlow.addColorStop(0, `rgba(255, 255, 255, ${(flash * 0.85).toFixed(3)})`);
-        flashGlow.addColorStop(1, 'rgba(255, 255, 255, 0)');
-        ctx.fillStyle = flashGlow;
+        ctx.fillStyle = `rgba(255, 255, 255, ${(flash * 0.18).toFixed(3)})`;
         ctx.fillRect(0, 0, width, height);
       }
       const cover = smoothstep(0.95, 1, zoom);

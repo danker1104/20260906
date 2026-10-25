@@ -11,11 +11,13 @@ export interface StageOutcome<T> {
 
 export class StageExecutionError extends Error {
   readonly reason: 'TIMEOUT' | 'INVALID_MODEL_RESPONSE';
+  readonly issuePaths: string[];
 
-  constructor(message: string, reason: 'TIMEOUT' | 'INVALID_MODEL_RESPONSE') {
+  constructor(message: string, reason: 'TIMEOUT' | 'INVALID_MODEL_RESPONSE', issuePaths: string[] = []) {
     super(message);
     this.name = 'StageExecutionError';
     this.reason = reason;
+    this.issuePaths = issuePaths;
   }
 }
 
@@ -24,16 +26,12 @@ export function classifyUpstreamError(error: unknown): string {
     return 'UNKNOWN_ERROR';
   }
 
-  const candidate = error as { status?: unknown; code?: unknown; name?: unknown; message?: unknown };
+  const candidate = error as { status?: unknown; code?: unknown; name?: unknown };
   const status = typeof candidate.status === 'number' ? `HTTP_${candidate.status}` : '';
   const code = typeof candidate.code === 'string' ? candidate.code.replace(/[^A-Z0-9_-]/gi, '').slice(0, 40) : '';
   const name = typeof candidate.name === 'string' ? candidate.name.replace(/[^A-Z0-9_-]/gi, '').slice(0, 40) : '';
-  const message = typeof candidate.message === 'string' ? candidate.message : '';
-  const safeMessage = message.match(/(?:API key|quota|rate|model|permission|invalid|unauthorized|forbidden|status|failed)[^\n]*/i)?.[0]
-    ?.replace(/AIza[\w-]+/g, '[REDACTED_KEY]')
-    .slice(0, 120);
+  return [status, code, name].filter(Boolean).join(':') || 'UNKNOWN_ERROR';
 
-  return [status, code, name, safeMessage].filter(Boolean).join(':') || 'UNKNOWN_ERROR';
 }
 
 export function isQuotaError(error: unknown): boolean {
@@ -57,7 +55,6 @@ export async function generateJson<T>(
   normalize?: (value: unknown) => unknown,
 ): Promise<T> {
   const text = await gateway.generateContent(request);
-  if (debugLabel && process.env.NODE_ENV !== 'production') console.info(`[${debugLabel} RAW RESPONSE]`, text);
   let parsed: unknown;
 
   try {
@@ -69,10 +66,9 @@ export async function generateJson<T>(
   const normalized = normalize ? normalize(parsed) : parsed;
   const result = schema.safeParse(normalized);
   if (!result.success) {
-    throw new StageExecutionError('Azure Foundry 응답이 예상한 schema와 일치하지 않습니다.', 'INVALID_MODEL_RESPONSE');
+    const issuePaths = [...new Set(result.error.issues.map((issue) => `${issue.path.join('.') || '$'}:${issue.code}`))].slice(0, 8);
+    throw new StageExecutionError('Azure Foundry 응답이 예상한 schema와 일치하지 않습니다.', 'INVALID_MODEL_RESPONSE', issuePaths);
   }
-
-  if (debugLabel && process.env.NODE_ENV !== 'production') console.info(`[${debugLabel} PARSED RESULT]`, result.data);
 
   return result.data;
 }

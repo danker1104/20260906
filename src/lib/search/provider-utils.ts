@@ -30,13 +30,22 @@ export async function readJson(response: Response): Promise<unknown> {
   }
 }
 
-export async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit, timeoutMs = configuredTimeoutMs()): Promise<Response> {
+export async function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init: RequestInit,
+  timeoutMs = configuredTimeoutMs(),
+  externalSignal?: AbortSignal,
+): Promise<Response> {
   const controller = new AbortController();
+  const abortFromExternalSignal = () => controller.abort(externalSignal?.reason);
+  if (externalSignal?.aborted) abortFromExternalSignal();
+  else externalSignal?.addEventListener('abort', abortFromExternalSignal, { once: true });
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(input, { ...init, signal: controller.signal, redirect: 'error' });
   } finally {
     clearTimeout(timer);
+    externalSignal?.removeEventListener('abort', abortFromExternalSignal);
   }
 }
 

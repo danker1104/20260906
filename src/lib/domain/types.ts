@@ -19,6 +19,8 @@ export type KoreanTitleStatus = (typeof koreanTitleStatuses)[number];
 
 export const contentTypes = [
   'MANGA',
+  'PUBLISHED_MANGA',
+  'SOCIAL_ORIGINAL_COMIC',
   'MANGA_VOLUME',
   'ARTBOOK',
   'FANBOOK',
@@ -28,6 +30,8 @@ export const contentTypes = [
   'ANIME',
   'ARTICLE',
   'FANART',
+  'FAN_ART',
+  'ILLUSTRATION',
   'SNS_POST',
   'MERCHANDISE',
   'OTHER',
@@ -71,6 +75,7 @@ export interface Candidate {
   author: string | null;
   koreanInvestigationStatus: StageStatus;
   yes24?: Yes24Enrichment;
+  namuWikiUrl?: string;
 }
 
 export interface Yes24Enrichment {

@@ -1,23 +1,60 @@
+import sharp from 'sharp';
 import type { Candidate, IdentifyStatus, ImageAnalysis, PreparedImage, StageStatus, VerificationStatus } from '../domain/types';
 import type { AzureFoundryGateway } from '../ai/azure-foundry-gateway';
 import { createAzureFoundryGateway } from '../ai/azure-foundry-gateway';
+import { canonicalResolverPrompt, canonicalResolverSystemPrompt, finalJudgmentPrompt, finalJudgmentSystemPrompt } from '../ai/prompts';
 import { finalJudgment, refineOcrForSearch } from './stages';
 import { isQuotaError } from './stage-utils';
-import { extractJapaneseText } from '../search/ocr-space';
+import { extractJapaneseText, getOcrUsabilityReason } from '../search/ocr-space';
 import { searchTavily } from '../search/tavily';
 import { searchGoogleLens } from '../search/serpapi';
 import { enrichCandidateWithYes24 } from '../search/yes24';
-import type { EvidenceCluster, LensDiagnostic, LensMatch, OcrExtraction, ResearchBundle, ResearchProviders, WebSearchResult } from '../search/types';
+import { enrichCandidatesWithNamuWiki, getNamuWikiWorkIdentity } from '../search/namuwiki';
+import { verifyKoreanTitleWithIsbn } from '../publication/verify-korean-title';
+import type { EvidenceCluster, IdentifyDiagnosticCode, LensDiagnostic, LensMatch, OcrExtraction, RankedLensCandidate, ResearchBundle, ResearchCandidate, ResearchProviders, TavilyConflict, WebSearchResult } from '../search/types';
+import { normalizeKoreanSearchTranslation } from '../search/korean-title';
 import { ExternalProviderError, uniqueBy } from '../search/provider-utils';
-import { buildRefinedJapaneseQueries, refineOcrQueries } from '../search/query-refinement';
+import { buildRefinedJapaneseQueries, refineOcrQueries, scoreOcrTitleCandidate, type OcrQueryRefinement } from '../search/query-refinement';
+import { normalizeJapaneseTitle, rankLensCandidates } from '../search/lens-candidates';
+import { findVerifiedOcrCorrections, hasFullWorkTitle, isJapaneseWorkSource, verifiedOcrWorkTitles } from '../search/work-title-verification';
+import { hashResearchCacheText, InMemoryTtlCache } from '../search/memory-cache';
 import { assertDeadline, getTotalTimeoutMs, RequestDeadlineError } from './request-deadline';
 
 export type { ResearchProviders } from '../search/types';
+
+const foundryResultCache = new InMemoryTtlCache<ResearchCandidate[]>({
+  clone: (candidates) => candidates.map((candidate) => ({ ...candidate, evidence: [...candidate.evidence] })),
+});
+const ocrRefinementCache = new InMemoryTtlCache<OcrQueryRefinement>({ clone: (result) => ({ ...result }) });
 
 function logProviderFailure(error: unknown): void {
   if (error instanceof ExternalProviderError) {
     console.error(JSON.stringify({ event: 'external_provider_error', code: error.code }));
   }
+}
+
+function safeDiagnosticText(value: string): string {
+  return value
+    .replace(/\b[\w.+-]+@[\w.-]+\.[A-Z]{2,}\b/giu, '[EMAIL]')
+    .replace(/https?:\/\/\S+/giu, '[URL]')
+    .replace(/@[\p{L}\p{N}_.-]{2,}/gu, '[ACCOUNT]')
+    .replace(/\b\d{5,}\b/gu, '[NUMBER]')
+    .replace(/\s+/gu, ' ')
+    .trim()
+    .slice(0, 160);
+}
+
+function summarizeOcrText(value: string): Record<string, number | boolean> {
+  const japaneseCharacters = [...value].filter((character) => /[\u3040-\u30ff\u3400-\u9fff]/u.test(character)).length;
+  const latinCharacters = [...value].filter((character) => /[A-Za-z]/u.test(character)).length;
+  return {
+    charCount: value.length,
+    lineCount: value.split(/[\r\n]+/u).filter(Boolean).length,
+    japaneseCharacters,
+    latinCharacters,
+    hasAccountMarker: /@[\p{L}\p{N}_.-]{2,}/u.test(value),
+    hasUrl: /https?:\/\//iu.test(value),
+  };
 }
 
 export interface PipelineStages {
@@ -33,6 +70,14 @@ export interface IdentifyPipelineResult {
   verificationStatus?: VerificationStatus;
   failureStage?: keyof PipelineStages;
   failureReason?: 'TIMEOUT' | 'UPSTREAM_ERROR' | 'INVALID_MODEL_RESPONSE' | 'RATE_LIMITED';
+  diagnosticCodes?: IdentifyDiagnosticCode[];
+}
+
+function foundryDiagnosticCode(error: unknown): IdentifyDiagnosticCode {
+  if (isQuotaError(error)) return 'FOUNDRY_RATE_LIMITED';
+  if (error && typeof error === 'object' && 'failureReason' in error
+    && (error as { failureReason?: string }).failureReason === 'INVALID_MODEL_RESPONSE') return 'FOUNDRY_INVALID_RESPONSE';
+  return 'FOUNDRY_UNAVAILABLE';
 }
 
 function getVerificationStatus(error: unknown): VerificationStatus {
@@ -99,8 +144,12 @@ function extractEvidenceSignals(title: string, content = ''): string[] {
 }
 
 function createEvidenceCluster(signal: string): EvidenceCluster {
+  const normalizedTitle = normalizeJapaneseTitle(signal);
   return {
+    clusterId: `evidence-${normalizedTitle}`,
     candidateTitle: signal,
+    normalizedTitle,
+    score: 2,
     signals: [signal],
     lensEvidence: [],
     tavilyEvidence: [],
@@ -109,78 +158,93 @@ function createEvidenceCluster(signal: string): EvidenceCluster {
     tavilyEvidenceCount: 0,
     mangaSignals: [],
     nonMangaSignals: [],
+    conflictingEvidence: [],
   };
-}
-
-function addClusterSignal(cluster: EvidenceCluster, signal: string, kind: 'LENS' | 'TAVILY', source: string): void {
-  if (!cluster.signals.some((existing) => similarEvidenceSignal(existing, signal))) cluster.signals.push(signal);
-  const normalizedSource = source.toLocaleLowerCase();
-  if (mangaContextPattern.test(signal)) cluster.mangaSignals.push(signal);
-  if (nonMangaPattern.test(`${signal} ${source}`)) cluster.nonMangaSignals.push(signal);
-  if (kind === 'LENS') cluster.lensEvidenceCount += 1;
-  else cluster.tavilyEvidenceCount += 1;
-  if (normalizedSource && !cluster.lensEvidence.some((evidence) => evidence.source.toLocaleLowerCase() === normalizedSource)
-    && !cluster.tavilyEvidence.some((evidence) => evidence.url.toLocaleLowerCase().includes(normalizedSource))) {
-    cluster.independentSourceCount += 1;
-  }
 }
 
 function buildEvidenceClusters(
+  lensCandidates: ReturnType<typeof rankLensCandidates>,
   lensMatches: LensMatch[],
   tavilyResults: WebSearchResult[],
   titleCandidates: string[] = [],
+  tavilyConflicts: Array<{ candidateTitle: string; title: string; sourceDomain: string }> = [],
 ): EvidenceCluster[] {
-  const clusters: EvidenceCluster[] = [];
-  const assign = (signal: string, kind: 'LENS' | 'TAVILY', source: string, evidence: LensMatch | WebSearchResult): void => {
-    let cluster = clusters.find((candidate) => candidate.signals.some((existing) => similarEvidenceSignal(existing, signal)));
-    if (!cluster) {
-      cluster = createEvidenceCluster(signal);
-      clusters.push(cluster);
-    }
-    addClusterSignal(cluster, signal, kind, source);
-    if (kind === 'LENS') {
-      const match = evidence as LensMatch;
-      if (!cluster.lensEvidence.some((item) => item.link === match.link)) cluster.lensEvidence.push({ title: match.title, source: match.source, link: match.link });
-    } else {
-      const result = evidence as WebSearchResult;
-      if (!cluster.tavilyEvidence.some((item) => item.url === result.url)) cluster.tavilyEvidence.push({ title: result.title, url: result.url });
-    }
-  };
-
-  for (const match of lensMatches) {
-    for (const signal of extractEvidenceSignals(match.title, match.source)) assign(signal, 'LENS', match.source || match.link, match);
+  const clusters = new Map<string, EvidenceCluster>();
+  for (const candidate of lensCandidates) {
+    const matchesByUrl = new Map(lensMatches.map((match) => [match.link, match]));
+    const lensEvidence = candidate.evidence.map((evidence) => {
+      const match = matchesByUrl.get(evidence.sourceUrl);
+      return { ...evidence, title: match?.title ?? evidence.candidateTitle, source: match?.source ?? evidence.sourceDomain };
+    });
+    const sourceDomains = new Set(lensEvidence.map((item) => item.sourceDomain).filter(Boolean));
+    clusters.set(candidate.normalizedTitle, {
+      clusterId: candidate.clusterId,
+      candidateTitle: candidate.candidateTitle,
+      normalizedTitle: candidate.normalizedTitle,
+      score: candidate.score,
+      signals: uniqueBy(lensEvidence.map((item) => item.candidateTitle), normalizeJapaneseTitle),
+      lensEvidence,
+      tavilyEvidence: [],
+      independentSourceCount: sourceDomains.size,
+      lensEvidenceCount: new Set(lensEvidence.map((item) => item.sourceUrl)).size,
+      tavilyEvidenceCount: 0,
+      mangaSignals: uniqueBy(lensEvidence
+        .filter((item) => item.evidenceType === 'HASHTAG' || item.evidenceType === 'QUOTED_TITLE' || mangaContextPattern.test(`${item.context ?? ''} ${item.candidateTitle}`))
+        .map((item) => item.candidateTitle), normalizeJapaneseTitle),
+      nonMangaSignals: uniqueBy(lensEvidence
+        .filter((item) => nonMangaPattern.test(`${item.context ?? ''} ${item.title} ${item.source}`))
+        .map((item) => item.candidateTitle), normalizeJapaneseTitle),
+      conflictingEvidence: [],
+    });
   }
+
+  for (const title of titleCandidates) {
+    const normalizedTitle = normalizeJapaneseTitle(title);
+    if (normalizedTitle && !clusters.has(normalizedTitle)) clusters.set(normalizedTitle, createEvidenceCluster(title));
+  }
+
   for (const result of tavilyResults) {
-    for (const signal of extractEvidenceSignals(result.title, result.content).slice(0, 2)) assign(signal, 'TAVILY', result.url, result);
+    const normalizedQueryTitle = normalizeJapaneseTitle(result.searchCandidateTitle ?? '');
+    const cluster = normalizedQueryTitle ? clusters.get(normalizedQueryTitle) : undefined;
+    if (!cluster || !hasRelevantResult(result, [cluster.candidateTitle])) continue;
+    if (!cluster.tavilyEvidence.some((evidence) => evidence.url === result.url)) {
+      cluster.tavilyEvidence.push({ title: result.title, url: result.url, content: result.content.slice(0, 320), searchQuery: result.searchQuery });
+    }
+    cluster.tavilyEvidenceCount = cluster.tavilyEvidence.length;
+    cluster.signals = uniqueBy([...cluster.signals, ...extractEvidenceSignals(result.title, result.content)], normalizeJapaneseTitle);
+    cluster.mangaSignals = uniqueBy([
+      ...cluster.mangaSignals,
+      ...extractEvidenceSignals(result.title, result.content).filter((signal) => mangaContextPattern.test(signal)),
+    ], normalizeJapaneseTitle);
+    cluster.score += 2;
   }
-  for (const title of titleCandidates) assign(title, 'TAVILY', 'ocr', { title, url: 'ocr', content: '', score: null });
 
-  return clusters
-    .map((cluster) => ({
-      ...cluster,
-      candidateTitle: [...cluster.signals].sort((left, right) => right.length - left.length)[0] ?? cluster.candidateTitle,
-      mangaSignals: uniqueBy(cluster.mangaSignals, normalizeEvidenceSignal),
-      nonMangaSignals: uniqueBy(cluster.nonMangaSignals, normalizeEvidenceSignal),
-      independentSourceCount: new Set([
-        ...cluster.lensEvidence.map((evidence) => evidence.source || evidence.link),
-        ...cluster.tavilyEvidence.map((evidence) => evidence.url),
-      ]).size,
-    }))
-    .sort((left, right) => {
-      const score = (cluster: EvidenceCluster) => cluster.mangaSignals.length * 4
-        + Math.min(cluster.lensEvidenceCount, 3) * 2
-        + Math.min(cluster.independentSourceCount, 4) * 2
-        - cluster.nonMangaSignals.length * 3;
-      return score(right) - score(left) || right.independentSourceCount - left.independentSourceCount;
+  for (const conflict of tavilyConflicts) {
+    const cluster = clusters.get(normalizeJapaneseTitle(conflict.candidateTitle));
+    if (!cluster || cluster.conflictingEvidence.some((item) => item.title === conflict.title && item.sourceDomain === conflict.sourceDomain)) continue;
+    cluster.conflictingEvidence.push({ title: conflict.title.slice(0, 120), sourceDomain: conflict.sourceDomain });
+  }
+
+  return [...clusters.values()]
+    .map((cluster) => {
+      const sources = new Set([
+        ...cluster.lensEvidence.map((evidence) => evidence.sourceDomain),
+        ...cluster.tavilyEvidence.map((evidence) => getSourceDomain(evidence.url)),
+      ].filter(Boolean));
+      return {
+        ...cluster,
+        mangaSignals: uniqueBy(cluster.mangaSignals, normalizeJapaneseTitle),
+        nonMangaSignals: uniqueBy(cluster.nonMangaSignals, normalizeJapaneseTitle),
+        independentSourceCount: sources.size,
+        conflictingEvidence: cluster.conflictingEvidence.slice(0, 3),
+      };
     })
-    .slice(0, 10);
+    .sort((left, right) => right.score - left.score || right.independentSourceCount - left.independentSourceCount);
 }
 
-function buildClusterQueries(clusters: EvidenceCluster[]): string[] {
-  return uniqueBy(
-    clusters.filter((cluster) => cluster.candidateTitle.length >= 2).slice(0, 2).map((cluster) => `${cluster.candidateTitle} 漫画`),
-    (query) => query,
-  );
+interface JapaneseSearchBatch {
+  results: WebSearchResult[];
+  conflicts: Array<{ candidateTitle: string; title: string; sourceDomain: string }>;
 }
 
 async function searchTavilyQueries(
@@ -188,33 +252,84 @@ async function searchTavilyQueries(
   queries: string[],
   clues: string[] = [],
   deadlineAt = Date.now() + getTotalTimeoutMs(),
-): Promise<WebSearchResult[]> {
+  queryCandidates: string[] = clues,
+  candidateSource: 'OCR' | 'LENS' = 'OCR',
+  requireFullTitle = false,
+): Promise<JapaneseSearchBatch> {
   const results: WebSearchResult[] = [];
-  for (const query of queries.slice(0, 2)) {
+  const conflicts: JapaneseSearchBatch['conflicts'] = [];
+  for (const [index, query] of queries.slice(0, 2).entries()) {
     assertDeadline(deadlineAt);
     try {
       const response = await providers.tavily(query);
       assertDeadline(deadlineAt);
-      results.push(...response);
-      if (clues.length > 0 && response.some((result) => hasRelevantResult(result, clues))) break;
+      const queryCandidate = queryCandidates[index];
+      const queryClues = queryCandidate ? [queryCandidate] : clues;
+      const corrections = requireFullTitle ? findVerifiedOcrCorrections(queryClues, response) : [];
+      const relevant = queryClues.length > 0
+        ? response.filter((result) => corrections.some((title) => hasFullWorkTitle(result, title)) || (hasRelevantResult(result, queryClues)
+          && (!requireFullTitle || queryClues.some((title) => hasFullWorkTitle(result, title)
+            || normalizeJapaneseTitle(result.title).includes(normalizeJapaneseTitle(title))
+            || normalizeJapaneseTitle(result.content).includes(normalizeJapaneseTitle(title))))))
+        : response;
+      if (queryCandidate) {
+        conflicts.push(...response
+          .filter((result) => !relevant.some((item) => item.url === result.url))
+          .map((result) => ({ candidateTitle: queryCandidate, title: result.title, sourceDomain: getSourceDomain(result.url) })));
+      }
+      results.push(...relevant.map((result) => ({
+        ...result,
+        searchQuery: query,
+        ...(queryCandidate ? { searchCandidateTitle: corrections.find((title) => hasFullWorkTitle(result, title)) ?? queryCandidate } : {}),
+        searchCandidateSource: candidateSource,
+      })));
+      if (queryClues.length > 0 && relevant.length > 0
+        && (!requireFullTitle || verifiedOcrWorkTitles(queryClues, relevant).length > 0 || corrections.length > 0)) break;
     } catch (error) {
       if (error instanceof RequestDeadlineError) throw error;
       logProviderFailure(error);
     }
   }
-  return uniqueBy(results, (result) => result.url).slice(0, 10);
+  return {
+    results: uniqueBy(results, (result) => result.url).slice(0, 10),
+    conflicts: uniqueBy(conflicts, (conflict) => `${normalizeJapaneseTitle(conflict.candidateTitle)}|${conflict.sourceDomain}|${conflict.title}`).slice(0, 8),
+  };
 }
 
 async function runLensFallback(
   providers: ResearchProviders,
   images: PreparedImage[],
   deadlineAt: number,
-  reason: 'NO_USEFUL_OCR' | 'NO_RELEVANT_TAVILY',
+  reason: 'NO_TITLE_CANDIDATE' | 'UNVERIFIED_OCR_TITLE' | 'CONFLICTING_OCR_TITLES',
+  cropBoundsByImage: Array<{ top: number; bottom: number } | undefined> = [],
 ): Promise<LensMatch[]> {
   const selectedImage = selectLensImage(images);
   const selectedIndex = images.indexOf(selectedImage);
+  const cropBounds = cropBoundsByImage[selectedIndex];
+  let lensImage = selectedImage;
+  let cropBuffer: Buffer | undefined;
+  if (cropBounds) {
+    const top = Math.max(0, Math.floor(cropBounds.top));
+    const bottom = Math.min(selectedImage.height, Math.ceil(cropBounds.bottom));
+    if (bottom - top >= selectedImage.height * 0.5) {
+      try {
+        cropBuffer = await sharp(selectedImage.buffer)
+          .extract({ left: 0, top, width: selectedImage.width, height: bottom - top })
+          .toFormat(selectedImage.mimeType === 'image/jpeg' ? 'jpeg' : selectedImage.mimeType === 'image/webp' ? 'webp' : 'png')
+          .toBuffer();
+        lensImage = { ...selectedImage, buffer: cropBuffer, height: bottom - top };
+      } catch {
+        cropBuffer = undefined;
+      }
+    }
+  }
   if (process.env.NODE_ENV !== 'production') {
     console.info('[LENS FALLBACK]', { status: 'STARTED', reason });
+    console.info('[SNS SCREEN CROP]', {
+      appliedTo: 'LENS',
+      applied: lensImage !== selectedImage,
+      reason: lensImage !== selectedImage ? 'SOCIAL_UI_BOUNDS_CONFIRMED' : cropBounds ? 'CROP_FAILED_OR_TOO_SMALL' : 'NO_SAFE_BOUNDS',
+    });
     console.info('[LENS SELECTED IMAGE]', {
       index: selectedIndex,
       mimeType: selectedImage.mimeType,
@@ -223,7 +338,7 @@ async function runLensFallback(
   }
   assertDeadline(deadlineAt);
   try {
-    const matches = await providers.lens(selectedImage);
+    const matches = await providers.lens(lensImage);
     assertDeadline(deadlineAt);
     return matches;
   } catch (error) {
@@ -239,16 +354,22 @@ async function runLensFallback(
       searchStatus: null,
       visualMatchCount: 0,
       error: error instanceof Error ? error.message.slice(0, 200) : 'LENS_ERROR',
+      failureCode: error instanceof ExternalProviderError && error.code === 'SERPAPI_UPLOAD_ERROR' ? 'LENS_UPLOAD_FAILED' : 'LENS_SEARCH_FAILED',
     };
     const emptyMatches = [] as LensMatch[] & { diagnostic?: LensDiagnostic };
     emptyMatches.diagnostic = diagnostic;
     return emptyMatches;
+  } finally {
+    cropBuffer?.fill(0);
   }
 }
 
-function buildAnalysis(ocrTexts: string[], queries: string[], lensMatches: LensMatch[]): ImageAnalysis {
+function buildAnalysis(ocrTexts: string[], queries: string[], lensMatches: LensMatch[], lensCandidates: RankedLensCandidate[] = []): ImageAnalysis {
   const dialogues = ocrTexts.filter((text) => text.length >= 6).slice(0, 20);
-  const possibleTitles = uniqueBy(lensMatches.map((match) => match.title), (title) => title).slice(0, 10);
+  const possibleTitles = uniqueBy([
+    ...lensCandidates.map((candidate) => candidate.candidateTitle),
+    ...lensMatches.map((match) => match.title),
+  ], normalizeJapaneseTitle).slice(0, 10);
   return {
     ocr: ocrTexts,
     dialogues,
@@ -261,28 +382,30 @@ function buildAnalysis(ocrTexts: string[], queries: string[], lensMatches: LensM
   };
 }
 
-function candidateSeeds(tavilyResults: WebSearchResult[], lensMatches: LensMatch[], titleCandidates: string[] = []): string[] {
-  const lensCandidateDetails = uniqueBy(lensMatches.map((match) => ({
-    title: match.title
-      .replace(/\s*(?:第\s*\d+\s*(?:話|巻|章)|chapter\s*\d+|episode\s*\d+).*$/iu, '')
-      .replace(/\b(?:manga|comic|official|chapter|episode)\b/giu, '')
-      .replace(/\s+/gu, ' ')
-      .trim(),
-    sourceIndex: match.sourceIndex ?? null,
-  })).filter(({ title }) => title.length >= 2), ({ title }) => title).slice(0, 5);
-  const lensCandidateClues = lensCandidateDetails.map(({ title }) => title);
-  if (process.env.NODE_ENV !== 'production') {
-    console.info('[LENS CANDIDATE EXTRACTION]', {
-      inputVisualMatchCount: lensMatches.length,
-      outputCandidateCount: lensCandidateClues.length,
-    });
-    lensCandidateDetails.forEach((candidate) => console.info({ candidateTitle: candidate.title, sourceVisualMatchIndex: candidate.sourceIndex, reason: 'normalized non-empty Lens title' }));
-    console.info('[LENS CANDIDATES]', lensCandidateClues);
+function candidateSeeds(
+  tavilyResults: WebSearchResult[],
+  lensMatches: LensMatch[],
+  titleCandidates: string[] = [],
+  lensCandidates: RankedLensCandidate[] = [],
+): string[] {
+  if (lensCandidates.length > 0 || lensMatches.length > 0) {
+    const isNoisyLensResponse = lensMatches.length > 20 || lensCandidates.length > 20;
+    const directLensTitles = lensCandidates
+      .filter((candidate) => candidate.confidence !== 'LOW'
+        && candidate.evidence.some((item) => item.evidenceType === 'TITLE' || item.evidenceType === 'QUOTED_TITLE' || item.evidenceType === 'HASHTAG'))
+      .map((candidate) => candidate.extractedJapaneseTitle);
+    return uniqueBy([
+      ...titleCandidates,
+      ...directLensTitles,
+      ...lensCandidates.filter((candidate) => candidate.confidence !== 'LOW').map((candidate) => candidate.candidateTitle),
+      ...(!lensCandidates.length ? tavilyResults.filter((result) => result.searchCandidateSource === 'OCR').map((result) => result.title) : []),
+    ], normalizeJapaneseTitle)
+      .filter((title) => title.length >= 2)
+      .slice(0, isNoisyLensResponse ? 5 : 10);
   }
   return uniqueBy([
     ...titleCandidates,
     ...tavilyResults.map((result) => result.title),
-    ...lensCandidateClues,
   ], (title) => title)
     .filter((title) => title.length >= 2)
     .slice(0, 10);
@@ -307,7 +430,7 @@ function fallbackCandidates(seeds: string[]): Candidate[] {
   }));
 }
 
-function normalizeCandidates(candidates: Candidate[]): Candidate[] {
+function normalizeCandidates<T extends Candidate>(candidates: T[]): T[] {
   return candidates.slice(0, 3).map((candidate, index) => ({ ...candidate, rank: (index + 1) as 1 | 2 | 3 }));
 }
 
@@ -356,13 +479,144 @@ function preserveKoreanInvestigationStatus(candidates: Candidate[], investigated
   });
 }
 
-async function enrichYes24(candidates: Candidate[]): Promise<Candidate[]> {
-  return Promise.all(candidates.map((candidate) => enrichCandidateWithYes24(candidate)));
+function alignKoreanJudgmentToCanonicalTitle(canonicalCandidates: Candidate[], koreanCandidates: Candidate[]): Candidate[] {
+  const canonicalCandidate = canonicalCandidates[0];
+  if (!canonicalCandidate) return [];
+  const matchingKoreanCandidate = koreanCandidates.find((candidate) => (
+    normalizeJapaneseTitle(candidate.japaneseTitle) === normalizeJapaneseTitle(canonicalCandidate.japaneseTitle)
+  ));
+  if (!matchingKoreanCandidate) {
+    return [{
+      ...canonicalCandidate,
+      rank: 1,
+      koreanTitle: null,
+      koreanTitleStatus: 'UNKNOWN',
+      publicationStatus: 'UNKNOWN',
+    }];
+  }
+
+  const confidenceOrder = { LOW: 0, MEDIUM: 1, HIGH: 2 } as const;
+  const confidence = confidenceOrder[matchingKoreanCandidate.confidence] < confidenceOrder[canonicalCandidate.confidence]
+    ? matchingKoreanCandidate.confidence
+    : canonicalCandidate.confidence;
+  return [{
+    ...canonicalCandidate,
+    rank: 1,
+    koreanTitle: matchingKoreanCandidate.koreanTitle,
+    koreanTitleStatus: matchingKoreanCandidate.koreanTitleStatus,
+    publicationStatus: matchingKoreanCandidate.publicationStatus,
+    confidence,
+    evidence: uniqueBy([...canonicalCandidate.evidence, ...matchingKoreanCandidate.evidence], (code) => code).slice(0, 5),
+  }];
 }
 
-function extractJapaneseTitle(value: string): string {
-  const parts = value.match(/[\u3040-\u30ff\u3400-\u9fff][\u3040-\u30ff\u3400-\u9fff\s・「」『』]{1,}/gu) ?? [];
-  return parts.join(' ').replace(/[「」『』]/gu, '').replace(/\s+/gu, ' ').trim().slice(0, 80);
+function titlesReferToSameLensCandidate(left: string, right: string): boolean {
+  const normalizedLeft = normalizeJapaneseTitle(left);
+  const normalizedRight = normalizeJapaneseTitle(right);
+  return normalizedLeft === normalizedRight
+    || (Math.min(normalizedLeft.length, normalizedRight.length) >= 6
+      && (normalizedLeft.includes(normalizedRight) || normalizedRight.includes(normalizedLeft)));
+}
+
+function preserveStrongLensCandidate(
+  canonicalCandidates: ResearchCandidate[],
+  lensCandidates: RankedLensCandidate[],
+  results: WebSearchResult[],
+): { candidates: ResearchCandidate[]; preservedTitle: string | null } {
+  const strongDirectCandidates = lensCandidates.filter((candidate) => (
+    candidate.confidence !== 'LOW'
+    && candidate.evidence.some((item) => item.evidenceType === 'TITLE' || item.evidenceType === 'QUOTED_TITLE' || item.evidenceType === 'HASHTAG')
+  ));
+  if (strongDirectCandidates.length !== 1) return { candidates: canonicalCandidates, preservedTitle: null };
+
+  const directCandidate = strongDirectCandidates[0];
+  if (canonicalCandidates.some((candidate) => titlesReferToSameLensCandidate(candidate.japaneseTitle, directCandidate.extractedJapaneseTitle))) {
+    return { candidates: canonicalCandidates, preservedTitle: null };
+  }
+  const directTitle = normalizeJapaneseTitle(directCandidate.extractedJapaneseTitle);
+  const verifiedReading = canonicalCandidates.some((candidate) => results.some((result) => (
+    normalizeJapaneseTitle(result.searchCandidateTitle ?? '') === directTitle
+    && verifiedOcrWorkTitles([candidate.japaneseTitle], [result]).length > 0
+    && [...result.content.matchAll(/[『「]([^』」\r\n]{1,200})[』」]\s*[（(]([^）)\r\n]{1,200})[）)]/gu)]
+      .some((match) => normalizeJapaneseTitle(match[1]) === normalizeJapaneseTitle(candidate.japaneseTitle)
+        && normalizeJapaneseTitle(match[2]) === directTitle)
+  )));
+  if (verifiedReading) return { candidates: canonicalCandidates, preservedTitle: null };
+
+  return {
+    candidates: [{
+      rank: 1,
+      japaneseTitle: directCandidate.extractedJapaneseTitle,
+      pronunciation: null,
+      koreanTitle: null,
+      koreanTitleStatus: 'UNKNOWN',
+      publicationStatus: 'UNKNOWN',
+      confidence: 'LOW',
+      evidence: ['WORK_TITLE_MATCH', 'VISUAL_CLUE_MATCH'],
+      author: null,
+      koreanInvestigationStatus: 'SKIPPED',
+    }],
+    preservedTitle: directCandidate.extractedJapaneseTitle,
+  };
+}
+
+function createUnverifiedLensCandidates(lensCandidates: RankedLensCandidate[]): Candidate[] {
+  const evidencePriority = (candidate: RankedLensCandidate) => candidate.evidence.reduce((priority, item) => {
+    const typePriority = item.evidenceType === 'HASHTAG' ? 0 : item.evidenceType === 'QUOTED_TITLE' ? 1 : item.evidenceType === 'TITLE' ? 2 : 3;
+    return Math.min(priority, typePriority);
+  }, 3);
+  return lensCandidates
+    .filter((candidate) => candidate.confidence !== 'LOW'
+      && candidate.evidence.some((item) => item.evidenceType === 'TITLE' || item.evidenceType === 'QUOTED_TITLE' || item.evidenceType === 'HASHTAG'))
+    .sort((left, right) => evidencePriority(left) - evidencePriority(right)
+      || right.score - left.score
+      || left.position - right.position)
+    .slice(0, 3)
+    .map((candidate, index) => ({
+      rank: (index + 1) as 1 | 2 | 3,
+      japaneseTitle: candidate.extractedJapaneseTitle,
+      pronunciation: null,
+      koreanTitle: null,
+      koreanTitleStatus: 'UNKNOWN',
+      publicationStatus: 'UNKNOWN',
+      confidence: 'LOW',
+      evidence: ['VISUAL_CLUE_MATCH', 'SEARCH_CONSISTENCY'],
+      author: null,
+      koreanInvestigationStatus: 'SKIPPED',
+    }));
+}
+
+async function enrichYes24(candidates: Candidate[], results: WebSearchResult[], deadlineAt: number): Promise<Candidate[]> {
+  const enriched = await Promise.all(candidates.map(async (candidate) => {
+    const verifiedNames = uniqueBy(results.flatMap((result) => {
+      const identity = getNamuWikiWorkIdentity(result, candidate.japaneseTitle);
+      return identity?.koreanTitle ? [identity.koreanTitle] : [];
+    }), normalizeJapaneseTitle);
+    const selected = verifiedNames.length === 1 ? {
+      ...candidate,
+      koreanTitle: verifiedNames[0],
+      koreanTitleStatus: normalizeJapaneseTitle(candidate.koreanTitle ?? '') === normalizeJapaneseTitle(verifiedNames[0])
+        ? candidate.koreanTitleStatus : 'TRANSLATED' as const,
+    } : candidate;
+    const verified = await verifyKoreanTitleWithIsbn(selected, {
+      timeoutMs: Math.max(0, deadlineAt - Date.now() - 8_000),
+      allowNameCorrection: verifiedNames.length !== 1,
+    });
+    const next = await enrichCandidateWithYes24(verified.candidate, results, verified.isbn);
+    if (verifiedNames.length !== 1 || normalizeJapaneseTitle(next.koreanTitle ?? '') === normalizeJapaneseTitle(verifiedNames[0])) return next;
+    const title = verifiedNames[0];
+    return {
+      ...next,
+      koreanTitle: title,
+      koreanTitleStatus: normalizeJapaneseTitle(verified.candidate.koreanTitle ?? '') === normalizeJapaneseTitle(title)
+        ? verified.candidate.koreanTitleStatus : 'TRANSLATED' as const,
+    };
+  }));
+  return enrichCandidatesWithNamuWiki(enriched, results);
+}
+
+export function extractJapaneseTitle(value: string): string {
+  return value.replace(/\s+/gu, ' ').trim();
 }
 
 function normalizedKoreanText(value: string): string {
@@ -371,6 +625,15 @@ function normalizedKoreanText(value: string): string {
 
 function getSourceDomain(url: string): string {
   try { return new URL(url).hostname.replace(/^www\./u, ''); } catch { return url; }
+}
+
+function detectSocialPlatform(rawOcrText: string, lensMatches: LensMatch[]): string {
+  const context = `${rawOcrText} ${lensMatches.map((match) => `${match.source} ${match.link}`).join(' ')}`;
+  if (/instagram(?:\.com)?/iu.test(context)) return 'INSTAGRAM';
+  if (/tiktok(?:\.com)?/iu.test(context)) return 'TIKTOK';
+  if (/(?:twitter(?:\.com)?|x\.com)/iu.test(context)) return 'X';
+  if (/pixiv(?:\.net)?/iu.test(context)) return 'PIXIV';
+  return 'NONE';
 }
 
 function hasRepeatedCommonEvidence(title: string, japaneseTitle: string, results: WebSearchResult[]): boolean {
@@ -390,31 +653,39 @@ function hasRepeatedCommonEvidence(title: string, japaneseTitle: string, results
 }
 
 async function enrichKoreanInformation(
-  candidates: Candidate[],
+  candidates: ResearchCandidate[],
   tavily: ResearchProviders['tavily'],
   deadlineAt = Date.now() + getTotalTimeoutMs(),
-): Promise<{ candidates: Candidate[]; hadFailure: boolean; queries: string[]; results: WebSearchResult[]; titleCandidates: string[]; official: string[]; common: string[] }> {
+): Promise<{ candidates: Candidate[]; hadFailure: boolean; queries: string[]; results: WebSearchResult[]; titleCandidates: string[]; verifiedAliases: string[]; official: string[]; common: string[] }> {
   const japaneseTitle = extractJapaneseTitle(candidates[0]?.japaneseTitle ?? '');
+  const translation = normalizeKoreanSearchTranslation(candidates[0]?.koreanSearchTranslation);
   const queries: string[] = [];
   let hadFailure = false;
   let results: WebSearchResult[] = [];
   if (process.env.NODE_ENV !== 'production') {
-    console.info('[CANONICAL JAPANESE TITLE]', japaneseTitle);
-    console.info('[KOREAN INVESTIGATION START]', { japaneseTitle });
+    console.info('[KOREAN INVESTIGATION START]', { hasCanonicalTitle: Boolean(japaneseTitle) });
   }
+
+  const normalizeKoreanTitleCandidate = (value: string): string | null => {
+    const title = value
+      .replace(/\s*[-–—|]\s*(?:나무위키|알라딘|교보문고|YES24|예스24)\s*$/iu, '')
+      .replace(/\s+[-–—|]\s*$/u, '')
+      .replace(/\s+(?:\d+권?|한국어판|만화책|eBook|전자책|단행본|세트|정발|공식|판매|출간|출판)+\s*$/giu, '')
+      .replace(/\s+/gu, ' ')
+      .trim();
+    const ignored = /^(공식|판매|정발|출판|출간|한국어|제목|만화|만화책|도서|전자책|eBook)$/u;
+    const commerceNotice = /국내\s*배송만\s*가능|해외\s*거래처\s*사정|직수입\s*취소\s*수수료|^안내\s*·\s*도서$/u;
+    return title.length >= 2 && /[가-힣]/u.test(title) && !ignored.test(title) && !commerceNotice.test(title) ? title : null;
+  };
 
   const extractTitleCandidates = (items: WebSearchResult[]): string[] => {
     const counts = new Map<string, number>();
-    const ignored = /^(공식|판매|정발|출판|출간|한국어|제목|만화|만화책|도서|전자책|eBook)$/u;
     for (const item of items) {
       for (const source of [item.title, item.content, item.url]) {
-        const matches = source.match(/[가-힣][가-힣0-9·&'’' -]{1,}/gu) ?? [];
+        const matches = source.match(/[가-힣A-Za-z0-9][가-힣A-Za-z0-9·&'’×.+: -]{1,}/gu) ?? [];
         for (const match of matches) {
-          const candidate = match
-            .replace(/\s+(?:\d+권?|한국어판|만화책|eBook|전자책|단행본|세트|정발|공식|판매|출간|출판)+\s*$/giu, '')
-            .replace(/\s+/gu, ' ')
-            .trim();
-          if (candidate.length >= 2 && !ignored.test(candidate)) counts.set(candidate, (counts.get(candidate) ?? 0) + 1);
+          const candidate = normalizeKoreanTitleCandidate(match);
+          if (candidate) counts.set(candidate, (counts.get(candidate) ?? 0) + 1);
         }
       }
     }
@@ -427,12 +698,12 @@ async function enrichKoreanInformation(
       let domain = item.url;
       try { domain = new URL(item.url).hostname.replace(/^www\./u, ''); } catch { /* keep the URL as a stable source key */ }
       const haystack = `${item.title} ${item.content}`;
-      const official = /정발|정식(?:출판|발매)|정식 한국어판|한국어판|한국판|국내 출판|번역 출간/u.test(haystack)
-        || /kyobobook|yes24|aladin|ridibooks|ridi\.|series\.naver|page\.kakao|publisher|출판사/u.test(item.url.toLowerCase());
-      const matches = haystack.match(/[가-힣][가-힣0-9·&'’' -]{1,}/gu) ?? [];
+      const official = domain !== 'namu.wiki' && (/정발|정식(?:출판|발매)|정식 한국어판|한국어판|한국판|국내 출판|번역 출간/u.test(haystack)
+        || /kyobobook|yes24|aladin|ridibooks|ridi\.|series\.naver|page\.kakao|publisher|출판사/u.test(item.url.toLowerCase()));
+      const matches = [item.title, item.content].flatMap((source) => source.match(/[가-힣A-Za-z0-9][가-힣A-Za-z0-9·&'’×.+: -]{1,}/gu) ?? []);
       for (const match of matches) {
-        const candidate = match.replace(/\s+(?:\d+권?|한국어판|만화책|eBook|전자책|단행본|세트|정발|공식|판매|출간|출판)+\s*$/giu, '').replace(/\s+/gu, ' ').trim();
-        if (candidate.length < 3 || /^(공식|판매|정발|출판|출간|한국어|제목|만화|만화책|도서|전자책|eBook)$/u.test(candidate)) continue;
+        const candidate = normalizeKoreanTitleCandidate(match);
+        if (!candidate || candidate.length < 3) continue;
         const current = evidence.get(candidate) ?? { count: 0, domains: new Set<string>(), official: false };
         current.count += 1;
         current.domains.add(domain);
@@ -448,24 +719,28 @@ async function enrichKoreanInformation(
   };
 
   const hasStrongEvidence = (items: WebSearchResult[], titleCandidates: string[]) => items.some((item) => {
+    if (getSourceDomain(item.url) === 'namu.wiki') return false;
     const haystack = `${item.title} ${item.content}`;
     const source = item.url.toLowerCase();
     const hasTitle = titleCandidates.some((candidate) => haystack.includes(candidate));
     const hasSaleSignal = /정발|출판|출간|한국어판|정식|판매|구매|eBook|전자책|단행본|재고|도서/u.test(haystack);
     const hasStrongSource = /kyobobook|yes24|aladin|ridibooks|ridi\.|series\.naver|page\.kakao|publisher|출판사/u.test(source);
     const hasJapaneseSignal = (japaneseTitle.match(/[\u3040-\u30ff\u3400-\u9fff]{2,}/gu) ?? []).some((fragment) => haystack.includes(fragment));
-    return hasTitle && hasSaleSignal && (hasStrongSource || hasJapaneseSignal);
+    const matchesOriginal = !translation || normalizeJapaneseTitle(haystack).includes(normalizeJapaneseTitle(japaneseTitle));
+    return hasTitle && hasSaleSignal && (hasStrongSource || hasJapaneseSignal) && matchesOriginal;
   });
 
   const runKoreanQuery = async (query: string, number: 1 | 2) => {
     queries.push(query);
-    if (process.env.NODE_ENV !== 'production') console.info('[KOREAN SEARCH QUERY]', { number, query });
+    if (process.env.NODE_ENV !== 'production') {
+      console.info('[KOREAN SEARCH QUERY]', { number, query: safeDiagnosticText(query) });
+    }
     assertDeadline(deadlineAt);
     try {
       const response = await tavily(query);
       assertDeadline(deadlineAt);
       results = uniqueBy([...results, ...response], (result) => result.url).slice(0, 20);
-      if (process.env.NODE_ENV !== 'production') console.info('[KOREAN TAVILY RAW RESULTS]', { count: response.length, results: response });
+      if (process.env.NODE_ENV !== 'production') console.info('[KOREAN TAVILY RESULTS]', { count: response.length });
     } catch (error) {
       if (error instanceof RequestDeadlineError) throw error;
       logProviderFailure(error);
@@ -473,30 +748,52 @@ async function enrichKoreanInformation(
     }
   };
 
-  if (japaneseTitle) await runKoreanQuery(`"${japaneseTitle}" 한국`, 1);
+  if (japaneseTitle) await runKoreanQuery(translation ? `"${translation}" 만화` : `"${japaneseTitle}" 한국`, 1);
+  const verifiedNamuTitles = () => uniqueBy(results.flatMap((result) => {
+    const identity = getNamuWikiWorkIdentity(result, japaneseTitle);
+    return identity?.koreanTitle ? [identity.koreanTitle] : [];
+  }), normalizeJapaneseTitle);
+  const verifiedAlias = verifiedNamuTitles()[0];
   let titleCandidates = extractTitleCandidates(results);
-  const shouldRunSecondQuery = titleCandidates.length > 0 && !hasStrongEvidence(results, titleCandidates);
+  const shouldRunSecondQuery = Boolean(japaneseTitle) && (Boolean(translation) || titleCandidates.length > 0) && !hasStrongEvidence(results, titleCandidates);
   if (process.env.NODE_ENV !== 'production') console.info('[KOREAN QUERY 2 REQUIRED]', shouldRunSecondQuery);
   if (shouldRunSecondQuery) {
-    await runKoreanQuery(`"${titleCandidates[0]}" 만화`, 2);
+    const secondQuery = translation
+      ? verifiedAlias ? `"${verifiedAlias}" 만화` : `"${japaneseTitle}" 한국`
+      : `"${titleCandidates[0]}" 만화`;
+    await runKoreanQuery(secondQuery, 2);
     titleCandidates = extractTitleCandidates(results);
   }
 
+  const verifiedAliases = verifiedNamuTitles();
+  titleCandidates = uniqueBy([...verifiedAliases, ...titleCandidates], normalizeJapaneseTitle).slice(0, 5);
   const koreanTitleCandidate = titleCandidates[0] ?? null;
-  const classifiedTitles = titleEvidence(results);
+  const matchesVerifiedAlias = (result: WebSearchResult) => {
+    if (/[\u3040-\u30ff\u3400-\u9fff]/u.test(result.content)) return false;
+    const titles = result.title.match(/[가-힣A-Za-z0-9][가-힣A-Za-z0-9·&'’×.+: -]{1,}/gu) ?? [];
+    return titles.some((title) => verifiedAliases.some((alias) => (
+      normalizeJapaneseTitle(normalizeKoreanTitleCandidate(title) ?? '') === normalizeJapaneseTitle(alias)
+    )));
+  };
+  const identityResults = translation
+    ? results.filter((result) => getSourceDomain(result.url) === 'namu.wiki'
+      ? Boolean(getNamuWikiWorkIdentity(result, japaneseTitle))
+      : normalizeJapaneseTitle(`${result.title} ${result.content}`).includes(normalizeJapaneseTitle(japaneseTitle)) || matchesVerifiedAlias(result))
+    : results;
+  const classifiedTitles = titleEvidence(identityResults);
   if (process.env.NODE_ENV !== 'production') {
-    console.info('[KOREAN TITLE CANDIDATE]', { candidate: koreanTitleCandidate });
-    console.info('[KOREAN EVIDENCE]', { evidenceCount: results.length, results });
-    console.info('[KOREAN SEARCH RAW RESULTS]', results);
-    console.info('[OFFICIAL TITLE CANDIDATES]', classifiedTitles.official);
-    console.info('[COMMON TITLE CANDIDATES]', classifiedTitles.common);
-    console.info('[COMMON TITLE EVIDENCE]', { candidates: classifiedTitles.common, sourceCount: results.length });
+    console.info('[KOREAN SEARCH SUMMARY]', {
+      hasTitleCandidate: Boolean(koreanTitleCandidate),
+      evidenceCount: results.length,
+      officialCandidateCount: classifiedTitles.official.length,
+      commonCandidateCount: classifiedTitles.common.length,
+    });
   }
   const enriched = candidates.map((candidate) => ({
     ...candidate,
     koreanInvestigationStatus: results.length > 0 ? 'SUCCESS' as const : 'INSUFFICIENT' as const,
   }));
-  return { candidates: enriched, hadFailure, queries, results, titleCandidates, ...classifiedTitles };
+  return { candidates: enriched, hadFailure, queries, results, titleCandidates, verifiedAliases, ...classifiedTitles };
 }
 
 function defaultProviders(gateway?: AzureFoundryGateway): ResearchProviders {
@@ -506,23 +803,26 @@ function defaultProviders(gateway?: AzureFoundryGateway): ResearchProviders {
     lens: searchGoogleLens,
     refineOcr: async (rawText) => {
       try {
-        return await refineOcrForSearch(gateway ?? createAzureFoundryGateway(), rawText);
+        const cacheKey = hashResearchCacheText('ocr-refiner-v1', rawText);
+        return await ocrRefinementCache.getOrLoad(cacheKey, () => refineOcrForSearch(gateway ?? createAzureFoundryGateway(), rawText));
       } catch (error) {
-        if (process.env.NODE_ENV !== 'production') console.info('[FOUNDRY OCR REFINER FALLBACK]', { reason: String(error) });
+        if (process.env.NODE_ENV !== 'production') console.info('[FOUNDRY OCR REFINER FALLBACK]', { errorType: error instanceof Error ? error.name : 'UNKNOWN' });
         return refineOcrQueries([rawText]);
       }
     },
     judge: async (bundle: ResearchBundle) => {
+      const activeGateway = gateway ?? createAzureFoundryGateway();
+      const runJudgment = async (): Promise<ResearchCandidate[]> => {
       if (process.env.NODE_ENV !== 'production') {
         console.info('[FOUNDRY KOREAN INPUT]', {
-          titleCandidate: bundle.koreanTitleCandidates?.[0] ?? null,
+          hasTitleCandidate: Boolean(bundle.koreanTitleCandidates?.[0]),
           evidenceCount: bundle.koreanResults?.length ?? 0,
         });
       }
-      const outcome = await finalJudgment(gateway ?? createAzureFoundryGateway(), bundle);
+      const outcome = await finalJudgment(activeGateway, bundle);
       if (process.env.NODE_ENV !== 'production') {
         console.info('[KOREAN FINAL DECISION]', {
-          title: outcome.data?.[0]?.koreanTitle ?? null,
+          hasTitle: Boolean(outcome.data?.[0]?.koreanTitle),
           release: outcome.data?.[0]?.publicationStatus ?? null,
           status: outcome.status,
         });
@@ -532,9 +832,28 @@ function defaultProviders(gateway?: AzureFoundryGateway): ResearchProviders {
         const error = new Error(outcome.failureReason === 'RATE_LIMITED' ? 'Azure Foundry quota exceeded' : outcome.failureReason ?? 'Azure Foundry judgment failed');
         error.name = outcome.failureReason === 'RATE_LIMITED' ? 'AZURE_FOUNDRY_QUOTA_ERROR' : 'AZURE_FOUNDRY_ERROR';
         (error as Error & { verificationStatus?: VerificationStatus }).verificationStatus = outcome.verificationStatus;
+        (error as Error & { failureReason?: string }).failureReason = outcome.failureReason;
         throw error;
       }
       return outcome.data;
+      };
+
+      if (gateway) return runJudgment();
+      const isKoreanVerification = Boolean(bundle.koreanResults);
+      const request = {
+        model: process.env.AZURE_FOUNDRY_MODEL ?? '',
+        systemPrompt: isKoreanVerification ? finalJudgmentSystemPrompt : canonicalResolverSystemPrompt,
+        userPrompt: isKoreanVerification ? finalJudgmentPrompt(bundle) : canonicalResolverPrompt(bundle),
+      };
+      const cacheKey = hashResearchCacheText('foundry-v1', JSON.stringify([
+        process.env.AZURE_FOUNDRY_ENDPOINT ?? '',
+        request.model,
+        request.systemPrompt,
+        request.userPrompt,
+      ]));
+      return foundryResultCache.getOrLoad(cacheKey, async () => {
+        return runJudgment();
+      });
     },
   };
 }
@@ -545,6 +864,7 @@ export async function runIdentifyPipeline(
   deadlineAt = Date.now() + getTotalTimeoutMs(),
 ): Promise<IdentifyPipelineResult> {
   const providers = 'judge' in providersOrGateway ? providersOrGateway : defaultProviders(providersOrGateway);
+  const diagnosticCodes = new Set<IdentifyDiagnosticCode>();
   assertDeadline(deadlineAt);
   const ocrResults: OcrExtraction[] = await Promise.all(images.map(async (image) => {
     try {
@@ -557,69 +877,190 @@ export async function runIdentifyPipeline(
   assertDeadline(deadlineAt);
   const ocrTexts = uniqueBy(ocrResults.filter((result) => result.valid).map((result) => result.text), (text) => text);
   const rawOcrText = ocrResults.map((result) => result.rawText ?? result.text).filter(Boolean).join('\n');
-  const refinement = providers.refineOcr
+  if (process.env.NODE_ENV !== 'production') {
+    console.info('[OCR RAW]', ocrResults.map((result, imageIndex) => ({
+      imageIndex,
+      ...summarizeOcrText(result.rawText ?? result.text),
+    })));
+    console.info('[OCR RESULT]', ocrResults.map((result, imageIndex) => ({
+      imageIndex,
+      valid: result.valid,
+      confidence: result.ocrConfidence ?? null,
+      usabilityReason: getOcrUsabilityReason(result.text),
+      textLength: result.text.length,
+    })));
+  }
+  const localRefinement = refineOcrQueries(
+    ocrResults.map((result) => result.rawText ?? result.text),
+    ocrResults.map((result) => result.lines ?? []),
+  );
+  const modelRefinement = ocrTexts.length > 0 && providers.refineOcr
     ? await providers.refineOcr(rawOcrText)
-    : refineOcrQueries([rawOcrText]);
+    : localRefinement;
+  const titleCandidates = uniqueBy([...localRefinement.titleCandidates, ...modelRefinement.titleCandidates], normalizeJapaneseTitle)
+    .filter((title) => ocrResults.some((result) => normalizeJapaneseTitle(result.rawText ?? result.text).includes(normalizeJapaneseTitle(title))))
+    .slice(0, 6);
+  const refinement: OcrQueryRefinement = {
+    ...modelRefinement,
+    rawText: rawOcrText,
+    titleCandidates,
+    dialogueCandidates: uniqueBy([...localRefinement.dialogueCandidates, ...modelRefinement.dialogueCandidates], (text) => text).slice(0, 2),
+    queryType: titleCandidates.length > 0 ? 'TITLE' : localRefinement.dialogueCandidates.length > 0 || modelRefinement.dialogueCandidates.length > 0 ? 'DIALOGUE' : 'NONE',
+  };
   const searchClues = refinement.queryType === 'TITLE' ? refinement.titleCandidates : refinement.dialogueCandidates;
   if (process.env.NODE_ENV !== 'production') {
-    console.info('[OCR RAW]', refinement.rawText);
-    console.info('[OCR RESULT]', ocrTexts);
-    console.info('[OCR DECISION]', refinement.hasUsefulText && refinement.queryType !== 'NONE' ? 'USEFUL' : 'INSUFFICIENT');
     console.info('[QUERY REFINEMENT]', {
-      titleCandidates: refinement.titleCandidates,
-      dialogueCandidates: refinement.dialogueCandidates,
-      noise: refinement.noise,
+      rawTextLength: refinement.rawText.length,
+      validImageTextCount: ocrTexts.length,
+      usefulText: Boolean(refinement.hasUsefulText && refinement.queryType !== 'NONE'),
+      titleCandidates: refinement.titleCandidates.map((title) => ({
+        text: safeDiagnosticText(title),
+        ...scoreOcrTitleCandidate(title),
+      })),
+      dialogueCandidateCount: refinement.dialogueCandidates.length,
+      noiseCount: refinement.noise.length,
       queryType: refinement.queryType,
     });
   }
   let lensMatches: LensMatch[] = [];
+  let lensCandidates: RankedLensCandidate[] = [];
+  let lensWasSearched = false;
   let queries = buildRefinedJapaneseQueries(refinement);
-  if (process.env.NODE_ENV !== 'production') console.info('[REFINED JAPANESE QUERY]', queries);
-  let uniqueTavilyResults = await searchTavilyQueries(providers, queries, searchClues, deadlineAt);
-  let relevantTavilyResults = searchClues.length > 0
-    ? uniqueTavilyResults.filter((result) => hasRelevantResult(result, searchClues))
-    : uniqueTavilyResults;
+  if (process.env.NODE_ENV !== 'production') {
+    console.info('[REFINED JAPANESE QUERY]', queries.map((query) => ({
+      query: refinement.queryType === 'TITLE' ? safeDiagnosticText(query) : '[dialogue query redacted]',
+      queryType: refinement.queryType,
+      characterCount: query.length,
+    })));
+    console.info('[OCR SEARCH PLAN]', { queryCount: queries.length, clueCount: searchClues.length });
+  }
+  const ocrSearch = await searchTavilyQueries(providers, queries, searchClues, deadlineAt, searchClues, 'OCR', refinement.queryType === 'TITLE');
+  if (queries.length > 0 && ocrSearch.results.length === 0) diagnosticCodes.add('TAVILY_NO_RELEVANT_RESULTS');
+  let uniqueTavilyResults = ocrSearch.results;
+  let tavilyConflicts: TavilyConflict[] = ocrSearch.conflicts;
+  let relevantTavilyResults = uniqueTavilyResults;
+  const verifiedOcrTitles = uniqueBy([
+    ...verifiedOcrWorkTitles(refinement.titleCandidates, ocrSearch.results),
+    ...findVerifiedOcrCorrections(refinement.titleCandidates, ocrSearch.results),
+  ], normalizeJapaneseTitle);
+  if (process.env.NODE_ENV !== 'production') {
+    console.info('[OCR CANONICAL VALIDATION]', {
+      ocrCandidateCount: refinement.titleCandidates.length,
+      verifiedTitleCount: verifiedOcrTitles.length,
+      corrected: verifiedOcrTitles.some((title) => !refinement.titleCandidates.some((ocrTitle) => normalizeJapaneseTitle(ocrTitle) === normalizeJapaneseTitle(title))),
+      evidenceResultCount: ocrSearch.results.length,
+    });
+  }
+  const ocrEvidenceConflicts = ocrSearch.conflicts.length > 0;
 
-  if (ocrTexts.length === 0 || relevantTavilyResults.length === 0) {
+  if (verifiedOcrTitles.length !== 1 || ocrEvidenceConflicts) {
+    lensWasSearched = true;
     lensMatches = await runLensFallback(
       providers,
       images,
       deadlineAt,
-      ocrTexts.length === 0 ? 'NO_USEFUL_OCR' : 'NO_RELEVANT_TAVILY',
+      refinement.titleCandidates.length === 0 ? 'NO_TITLE_CANDIDATE' : verifiedOcrTitles.length > 1 || ocrEvidenceConflicts ? 'CONFLICTING_OCR_TITLES' : 'UNVERIFIED_OCR_TITLE',
+      ocrResults.map((result) => result.socialCropBounds),
     );
-    if (lensMatches.length > 0) {
-      const lensClusters = buildEvidenceClusters(lensMatches, [], refinement.titleCandidates);
-      const lensQueries = buildClusterQueries(lensClusters);
+    lensCandidates = rankLensCandidates(lensMatches.filter((match) => isJapaneseWorkSource({ url: match.link })));
+    const lensDiagnostic = (lensMatches as LensMatch[] & { diagnostic?: LensDiagnostic }).diagnostic;
+    if (lensDiagnostic?.failureCode) diagnosticCodes.add(lensDiagnostic.failureCode);
+    else if (lensMatches.length === 0) diagnosticCodes.add('LENS_EMPTY_RESULTS');
+    else if (lensCandidates.length === 0) diagnosticCodes.add('LENS_CANDIDATE_EXTRACTION_FAILED');
+    if (lensCandidates.length > 0) {
+      const directLensCandidates = lensCandidates.filter((candidate) => (
+        candidate.confidence !== 'LOW'
+        && candidate.evidence.some((item) => item.evidenceType === 'TITLE' || item.evidenceType === 'QUOTED_TITLE' || item.evidenceType === 'HASHTAG')
+      ));
+      const selectedLensCandidates = (directLensCandidates.length > 0 ? directLensCandidates : lensCandidates.filter((candidate) => candidate.confidence !== 'LOW')).slice(0, 2);
+      const lensQueryCandidates = selectedLensCandidates.map((candidate) => candidate.candidateTitle);
+      const lensQueries = lensQueryCandidates.map((title) => `${title} 漫画`);
       queries = [...queries, ...lensQueries];
-      const lensTavilyResults = await searchTavilyQueries(providers, lensQueries, lensMatches.map((match) => match.title), deadlineAt);
+      const lensSearch = await searchTavilyQueries(
+        providers,
+        lensQueries,
+        lensQueryCandidates,
+        deadlineAt,
+        lensQueryCandidates,
+        'LENS',
+      );
       if (process.env.NODE_ENV !== 'production') {
-        console.info('[TAVILY QUERIES FROM LENS]', lensQueries);
-        console.info('[TAVILY RESULTS]', { queryCount: lensQueries.length, resultCount: lensTavilyResults.length });
+        console.info('[REFINED JAPANESE QUERY]', lensQueries.map((query) => safeDiagnosticText(query)));
+        console.info('[LENS SEARCH PLAN]', { candidateCount: lensQueryCandidates.length, queryCount: lensQueries.length });
+        console.info('[LENS SEARCH RESULTS]', { queryCount: lensQueries.length, resultCount: lensSearch.results.length, conflictCount: lensSearch.conflicts.length });
       }
-      uniqueTavilyResults = uniqueBy([...uniqueTavilyResults, ...lensTavilyResults], (result) => result.url).slice(0, 10);
-      relevantTavilyResults = searchClues.length > 0
-        ? uniqueTavilyResults.filter((result) => hasRelevantResult(result, [...searchClues, ...lensMatches.map((match) => match.title)]))
-        : uniqueTavilyResults;
+      uniqueTavilyResults = uniqueBy([...uniqueTavilyResults, ...lensSearch.results], (result) => result.url).slice(0, 10);
+      tavilyConflicts = uniqueBy([...tavilyConflicts, ...lensSearch.conflicts], (conflict) => `${normalizeJapaneseTitle(conflict.candidateTitle)}|${conflict.sourceDomain}|${conflict.title}`).slice(0, 8);
+      relevantTavilyResults = uniqueTavilyResults;
+      if (lensSearch.results.length === 0) diagnosticCodes.add('TAVILY_NO_RELEVANT_RESULTS');
     }
   }
 
-  const seeds = candidateSeeds(relevantTavilyResults, lensMatches, refinement.titleCandidates);
-  const candidateClusters = buildEvidenceClusters(lensMatches, uniqueTavilyResults, refinement.titleCandidates);
+  if (process.env.NODE_ENV !== 'production') {
+    console.info('[LENS VISUAL MATCHES TOP 10]', {
+      attempted: lensWasSearched,
+      matches: lensMatches.slice(0, 10).map((match, index) => ({
+        rank: index + 1,
+        position: match.position ?? match.sourceIndex ?? index + 1,
+        title: safeDiagnosticText(match.title),
+        extractedJapaneseTitle: safeDiagnosticText(extractJapaneseTitle(`${match.title} ${match.snippet ?? ''}`)),
+        source: getSourceDomain(match.link),
+        matchScore: match.matchScore ?? null,
+      })),
+    });
+    console.info('[LENS CANDIDATES]', lensCandidates.map((candidate) => ({
+      rawTitle: safeDiagnosticText(candidate.rawTitle),
+      normalizedTitle: candidate.normalizedTitle,
+      source: candidate.source,
+      sourceHost: getSourceDomain(candidate.url),
+      position: candidate.position,
+      extractedJapaneseTitle: safeDiagnosticText(candidate.extractedJapaneseTitle),
+      confidence: candidate.confidence,
+      clusterId: candidate.clusterId,
+    })));
+  }
+
+  const researchTitles = uniqueBy([...verifiedOcrTitles, ...refinement.titleCandidates], normalizeJapaneseTitle);
+  const seeds = candidateSeeds(relevantTavilyResults, lensMatches, researchTitles, lensCandidates);
+  const strongLensTitles = new Set(lensCandidates
+    .filter((candidate) => candidate.confidence !== 'LOW' && candidate.evidence.some((item) => item.evidenceType === 'TITLE' || item.evidenceType === 'QUOTED_TITLE' || item.evidenceType === 'HASHTAG'))
+    .map((candidate) => candidate.normalizedTitle));
+  const noisyLensResponse = lensMatches.length > 20 || lensCandidates.length > 20;
+  const trustedNoisyTitles = new Set([
+    ...verifiedOcrTitles.map(normalizeJapaneseTitle),
+    ...refinement.titleCandidates.map(normalizeJapaneseTitle),
+    ...strongLensTitles,
+  ]);
+  const candidateClusters = buildEvidenceClusters(lensCandidates, lensMatches, relevantTavilyResults, researchTitles, tavilyConflicts)
+    .filter((cluster) => !noisyLensResponse || trustedNoisyTitles.has(cluster.normalizedTitle))
+    .sort((left, right) => Number(strongLensTitles.has(right.normalizedTitle)) - Number(strongLensTitles.has(left.normalizedTitle))
+      || right.score - left.score
+      || right.independentSourceCount - left.independentSourceCount)
+    .slice(0, lensCandidates.length > 20 ? 5 : 8);
   const clusteredSeeds = uniqueBy([
-    ...candidateClusters.filter((cluster) => cluster.mangaSignals.length > 0).map((cluster) => cluster.candidateTitle),
+    ...candidateClusters.filter((cluster) => cluster.score > 0).map((cluster) => cluster.candidateTitle),
     ...seeds,
   ], (title) => title).slice(0, 10);
   if (process.env.NODE_ENV !== 'production') {
+    console.info('[CANDIDATE SEEDS]', clusteredSeeds.map((title) => safeDiagnosticText(title)));
     console.info('[IDENTIFICATION PATH]', lensMatches.length > 0 ? 'LENS_TAVILY_FOUNDRY' : 'OCR_TAVILY_FOUNDRY');
+    console.info('[SOCIAL PLATFORM DETECTED]', detectSocialPlatform(rawOcrText, lensMatches));
     console.info('[FOUNDRY IDENTIFICATION INPUT]', {
-      candidateSeeds: clusteredSeeds,
-      candidateClusters,
-      lensMatches: lensMatches.map(({ title, source, link }) => ({ title, source, link })),
-      tavilyResultCount: uniqueTavilyResults.length,
-      tavilyCandidates: uniqueTavilyResults.map(({ title, url }) => ({ title, url })),
+      candidateCount: clusteredSeeds.length,
+      clusterCount: candidateClusters.length,
+      candidateSeeds: clusteredSeeds.map((title) => safeDiagnosticText(title)),
+      lensCandidateTitles: lensCandidates.slice(0, 8).map((candidate) => ({
+        title: safeDiagnosticText(candidate.extractedJapaneseTitle),
+        confidence: candidate.confidence,
+        clusterId: candidate.clusterId,
+      })),
+      lensMatchCount: lensMatches.length,
+      lensCandidateCount: lensCandidates.length,
+      tavilyResultCount: relevantTavilyResults.length,
+      conflictCount: tavilyConflicts.length,
     });
   }
-  const analysis = buildAnalysis(ocrTexts, queries, lensMatches);
+  const analysis = buildAnalysis(ocrTexts, queries, lensMatches, lensCandidates);
 
   if (process.env.NODE_ENV !== 'production') {
     const diagnostic = (lensMatches as LensMatch[] & { diagnostic?: LensDiagnostic }).diagnostic;
@@ -630,11 +1071,12 @@ export async function runIdentifyPipeline(
       searchStatus: diagnostic?.searchStatus ?? null,
       visualMatchCount: diagnostic?.visualMatchCount ?? lensMatches.length,
       candidateCount: clusteredSeeds.length,
+      lensCandidateCount: lensCandidates.length,
       classification: diagnostic?.stage === 'UPLOAD' ? 'B' : diagnostic?.stage === 'SEARCH' || diagnostic?.stage === 'PARSE' ? 'C' : diagnostic?.visualMatchCount === 0 ? 'D' : clusteredSeeds.length === 0 ? 'E' : 'SUCCESS',
     });
   }
 
-  if (clusteredSeeds.length === 0) {
+  if (clusteredSeeds.length === 0 || (relevantTavilyResults.length === 0 && lensCandidates.length === 0)) {
     if (process.env.NODE_ENV !== 'production') {
       console.info('[INSUFFICIENT REASON]', {
         reason: 'candidateSeeds.length === 0',
@@ -650,32 +1092,83 @@ export async function runIdentifyPipeline(
       stages: { imageAnalysis: 'INSUFFICIENT', finalJudgment: 'SKIPPED' },
       candidates: [],
       analysis,
+      diagnosticCodes: [...diagnosticCodes, 'INSUFFICIENT_EVIDENCE'],
     };
   }
 
   const research: ResearchBundle = {
     ocrTexts,
+    rawOcrText,
+    ocrTitleCandidates: refinement.titleCandidates,
+    verifiedOcrTitles,
     tavilyResults: uniqueTavilyResults,
     lensMatches,
     candidateSeeds: clusteredSeeds,
     candidateClusters,
   };
   assertDeadline(deadlineAt);
-  let canonicalCandidates: Candidate[];
+  let canonicalCandidates: ResearchCandidate[];
   let canonicalFailure: unknown;
   try {
-    canonicalCandidates = normalizeCandidates(await providers.judge(research));
+    const foundryCandidates = normalizeCandidates(await providers.judge(research))
+      .map((candidate) => ({ ...candidate, japaneseTitle: cleanJapaneseTitle(candidate.japaneseTitle) }));
+    const supportedCandidates = refinement.titleCandidates.length === 0 ? foundryCandidates : foundryCandidates.filter((candidate) => {
+      const normalizedTitle = normalizeJapaneseTitle(candidate.japaneseTitle);
+      if (verifiedOcrTitles.length > 0) return verifiedOcrTitles.some((title) => normalizeJapaneseTitle(title) === normalizedTitle)
+        || lensCandidates.some((lensCandidate) => lensCandidate.normalizedTitle === normalizedTitle && lensCandidate.confidence !== 'LOW'
+          && verifiedOcrWorkTitles([candidate.japaneseTitle], relevantTavilyResults).length > 0);
+      return relevantTavilyResults.some((result) => {
+        const queryTitle = normalizeJapaneseTitle(result.searchCandidateTitle ?? '');
+        return isJapaneseWorkSource(result)
+          && (hasFullWorkTitle(result, candidate.japaneseTitle) || normalizeJapaneseTitle(result.content).includes(normalizedTitle))
+          && (queryTitle === normalizedTitle || (queryTitle.length >= 4 && normalizedTitle.includes(queryTitle)));
+      }) || lensCandidates.some((lensCandidate) => lensCandidate.confidence !== 'LOW'
+        && lensCandidate.normalizedTitle === normalizedTitle
+        && lensCandidate.evidence.some((item) => item.evidenceType === 'TITLE' || item.evidenceType === 'QUOTED_TITLE' || item.evidenceType === 'HASHTAG'));
+    }).map((candidate) => ({ ...candidate, ...(verifiedOcrTitles.length !== 1 || ocrEvidenceConflicts ? { confidence: 'LOW' as const } : {}) }));
+    const lensPreservation = refinement.titleCandidates.length > 0
+      ? { candidates: supportedCandidates, preservedTitle: null }
+      : preserveStrongLensCandidate(supportedCandidates, lensCandidates, relevantTavilyResults);
+    canonicalCandidates = lensPreservation.candidates;
     assertDeadline(deadlineAt);
-    if (process.env.NODE_ENV !== 'production') console.info('[CANONICAL JAPANESE TITLE]', canonicalCandidates[0]?.japaneseTitle ?? null);
+    if (process.env.NODE_ENV !== 'production') {
+      console.info('[FOUNDRY IDENTIFICATION OUTPUT]', {
+        candidateTitles: foundryCandidates.map((candidate) => candidate.japaneseTitle),
+        preservedLensCandidate: Boolean(lensPreservation.preservedTitle),
+      });
+      console.info('[CANONICAL RESOLVER RESULT]', { candidateCount: canonicalCandidates.length });
+      console.info('[FINAL CANONICAL JAPANESE TITLE]', canonicalCandidates[0]?.japaneseTitle ?? null);
+    }
   } catch (error) {
     if (error instanceof RequestDeadlineError) throw error;
-    const fallback = selectSingleCandidate(fallbackCandidates(refinement.titleCandidates));
+    diagnosticCodes.add(foundryDiagnosticCode(error));
+    const fallbackTitles = verifiedOcrTitles.length === 1 ? verifiedOcrTitles : providers.refineOcr ? modelRefinement.titleCandidates : [];
+    const fallback = selectSingleCandidate(fallbackCandidates(fallbackTitles));
     if (fallback.length === 0) {
-      return { status: 'FAILED', stages: { imageAnalysis: 'SUCCESS', finalJudgment: 'FAILED' }, candidates: [], analysis, verificationStatus: getVerificationStatus(error), failureStage: 'finalJudgment', failureReason: isQuotaError(error) ? 'RATE_LIMITED' : 'UPSTREAM_ERROR' };
+      const lensFallback = createUnverifiedLensCandidates(lensCandidates);
+      if (lensFallback.length > 0) {
+        if (process.env.NODE_ENV !== 'production') {
+          console.info('[CANONICAL FAILURE LENS FALLBACK]', lensFallback.map((candidate) => ({
+            japaneseTitle: safeDiagnosticText(candidate.japaneseTitle),
+            confidence: candidate.confidence,
+          })));
+        }
+        return {
+          status: 'PARTIAL_SUCCESS',
+          stages: { imageAnalysis: 'SUCCESS', finalJudgment: 'FAILED' },
+          candidates: lensFallback,
+          analysis,
+          verificationStatus: getVerificationStatus(error),
+          failureStage: 'finalJudgment',
+          failureReason: isQuotaError(error) ? 'RATE_LIMITED' : 'UPSTREAM_ERROR',
+          diagnosticCodes: [...diagnosticCodes],
+        };
+      }
+      return { status: 'FAILED', stages: { imageAnalysis: 'SUCCESS', finalJudgment: 'FAILED' }, candidates: [], analysis, verificationStatus: getVerificationStatus(error), failureStage: 'finalJudgment', failureReason: isQuotaError(error) ? 'RATE_LIMITED' : 'UPSTREAM_ERROR', diagnosticCodes: [...diagnosticCodes] };
     }
     canonicalCandidates = fallback;
     canonicalFailure = error;
-    if (process.env.NODE_ENV !== 'production') console.info('[CANONICAL JAPANESE TITLE]', canonicalCandidates[0]?.japaneseTitle ?? null);
+    if (process.env.NODE_ENV !== 'production') console.info('[CANONICAL RESOLVER RESULT]', { fallbackCandidateCount: canonicalCandidates.length });
   }
 
   if (canonicalCandidates.length === 0) {
@@ -685,7 +1178,8 @@ export async function runIdentifyPipeline(
         candidateSeedCount: seeds.length,
       });
     }
-    return { status: 'INSUFFICIENT', stages: { imageAnalysis: 'SUCCESS', finalJudgment: 'INSUFFICIENT' }, candidates: [], analysis };
+    diagnosticCodes.add('INSUFFICIENT_EVIDENCE');
+    return { status: 'INSUFFICIENT', stages: { imageAnalysis: 'SUCCESS', finalJudgment: 'INSUFFICIENT' }, candidates: [], analysis, diagnosticCodes: [...diagnosticCodes] };
   }
 
   const korean = await enrichKoreanInformation(canonicalCandidates, providers.tavily, deadlineAt);
@@ -697,18 +1191,31 @@ export async function runIdentifyPipeline(
     lensMatches: [],
     candidateSeeds: canonicalJapaneseTitle ? [canonicalJapaneseTitle] : [],
     koreanResults: korean.results,
+    koreanSearchTranslation: normalizeKoreanSearchTranslation(canonicalCandidates[0]?.koreanSearchTranslation),
+    koreanVerifiedAliases: korean.verifiedAliases,
     koreanTitleCandidates: korean.titleCandidates,
     koreanOfficialTitleCandidates: korean.official,
     koreanCommonTitleCandidates: korean.common,
   };
   if (process.env.NODE_ENV !== 'production') {
-    console.info('[KOREAN SEARCH INPUT]', canonicalJapaneseTitle);
+    console.info('[KOREAN INVESTIGATION INPUT]', {
+      canonicalJapaneseTitle: safeDiagnosticText(canonicalJapaneseTitle),
+      queryCount: korean.queries.length,
+      queryLengths: korean.queries.map((query) => query.length),
+    });
     console.info('[KOREAN FOUNDRY INPUT]', {
-      titleCandidate: verifiedResearch.koreanTitleCandidates?.[0] ?? null,
+      hasTitleCandidate: Boolean(verifiedResearch.koreanTitleCandidates?.[0]),
       evidenceCount: verifiedResearch.koreanResults?.length ?? 0,
-      evidence: verifiedResearch.koreanResults ?? [],
-      officialTitleCandidates: verifiedResearch.koreanOfficialTitleCandidates ?? [],
-      commonTitleCandidates: verifiedResearch.koreanCommonTitleCandidates ?? [],
+      officialTitleCandidateCount: verifiedResearch.koreanOfficialTitleCandidates?.length ?? 0,
+      commonTitleCandidateCount: verifiedResearch.koreanCommonTitleCandidates?.length ?? 0,
+    });
+  }
+  if (process.env.NODE_ENV !== 'production') {
+    console.info('[KOREAN INVESTIGATION OUTPUT]', {
+      titleCandidates: korean.titleCandidates.map(safeDiagnosticText),
+      officialTitles: korean.official.map(safeDiagnosticText),
+      commonTitles: korean.common.map(safeDiagnosticText),
+      resultCount: korean.results.length,
     });
   }
   let judgedCandidates: Candidate[];
@@ -717,7 +1224,8 @@ export async function runIdentifyPipeline(
     assertDeadline(deadlineAt);
   } catch (error) {
     if (error instanceof RequestDeadlineError) throw error;
-    const partialCandidates = await enrichYes24(selectSingleCandidate(korean.candidates));
+    diagnosticCodes.add(foundryDiagnosticCode(error));
+    const partialCandidates = await enrichYes24(selectSingleCandidate(korean.candidates), korean.results, deadlineAt);
     return {
       status: 'PARTIAL_SUCCESS',
       stages: { imageAnalysis: 'SUCCESS', finalJudgment: 'FAILED' },
@@ -726,28 +1234,53 @@ export async function runIdentifyPipeline(
       verificationStatus: getVerificationStatus(error),
       failureStage: 'finalJudgment',
       failureReason: isQuotaError(error) ? 'RATE_LIMITED' : 'UPSTREAM_ERROR',
+      diagnosticCodes: [...diagnosticCodes],
     };
+  }
+  if (process.env.NODE_ENV !== 'production') {
+    console.info('[KOREAN FOUNDRY OUTPUT]', judgedCandidates.map((candidate) => ({
+      japaneseTitle: safeDiagnosticText(candidate.japaneseTitle),
+      koreanTitle: safeDiagnosticText(candidate.koreanTitle ?? ''),
+      koreanTitleStatus: candidate.koreanTitleStatus,
+      confidence: candidate.confidence,
+      publicationStatus: candidate.publicationStatus,
+    })));
+  }
+  const koreanTitleMatchedCanonical = judgedCandidates.some((candidate) => (
+    normalizeJapaneseTitle(candidate.japaneseTitle) === normalizeJapaneseTitle(canonicalJapaneseTitle)
+  ));
+  judgedCandidates = alignKoreanJudgmentToCanonicalTitle(canonicalCandidates, judgedCandidates);
+  if (process.env.NODE_ENV !== 'production') {
+    console.info('[KOREAN VERIFIER CANONICAL ALIGNMENT]', { titleMatched: koreanTitleMatchedCanonical });
+    console.info('[KOREAN TITLE SELECTION]', judgedCandidates.map((candidate) => ({
+      selectedTitle: safeDiagnosticText(candidate.koreanTitle ?? ''),
+      status: candidate.koreanTitleStatus,
+      publicationStatus: candidate.publicationStatus,
+      reason: !koreanTitleMatchedCanonical ? 'CANONICAL_MISMATCH' : candidate.koreanTitleStatus,
+      verifiedAliasCount: korean.verifiedAliases.length,
+      namuCandidateCount: korean.results.filter((result) => getSourceDomain(result.url) === 'namu.wiki').length,
+    })));
   }
 
   let reverseSearchFailed = false;
+  let linkResults = korean.results;
   const translatedCandidate = judgedCandidates.find((candidate) => candidate.koreanTitle && candidate.koreanTitleStatus === 'TRANSLATED');
   const translatedTitle = translatedCandidate?.koreanTitle;
   if (translatedCandidate && translatedTitle && korean.official.length === 0 && korean.common.length === 0) {
     const reverseQuery = `"${translatedTitle}" "${extractJapaneseTitle(translatedCandidate.japaneseTitle)}"`;
-    if (process.env.NODE_ENV !== 'production') console.info('[TRANSLATED TITLE CANDIDATE]', translatedTitle);
-    if (process.env.NODE_ENV !== 'production') console.info('[COMMON REVERSE SEARCH QUERY]', reverseQuery);
+    if (process.env.NODE_ENV !== 'production') console.info('[COMMON REVERSE SEARCH]', { enabled: true });
     try {
       assertDeadline(deadlineAt);
       const reverseResults = await providers.tavily(reverseQuery);
       assertDeadline(deadlineAt);
+      linkResults = uniqueBy([...linkResults, ...reverseResults], (result) => result.url);
       const commonEvidence = reverseResults.filter((result) => {
         const haystack = normalizedKoreanText(`${result.title} ${result.content}`);
         return haystack.includes(normalizedKoreanText(translatedTitle));
       });
       const commonVerified = hasRepeatedCommonEvidence(translatedTitle, extractJapaneseTitle(translatedCandidate.japaneseTitle), reverseResults);
       if (process.env.NODE_ENV !== 'production') {
-        console.info('[COMMON SEARCH RESULTS]', reverseResults);
-        console.info('[COMMON EVIDENCE COUNT]', commonEvidence.length);
+        console.info('[COMMON SEARCH RESULTS]', { resultCount: reverseResults.length, evidenceCount: commonEvidence.length });
         console.info('[COMMON VERIFICATION RESULT]', { verified: commonVerified, sourceCount: new Set(commonEvidence.map((result) => getSourceDomain(result.url))).size });
       }
       analysis.searchQueries.korean.push(reverseQuery);
@@ -758,27 +1291,34 @@ export async function runIdentifyPipeline(
           koreanTitleCandidates: [translatedTitle, ...(verifiedResearch.koreanTitleCandidates ?? [])],
           koreanCommonTitleCandidates: [translatedTitle],
         };
-        if (process.env.NODE_ENV !== 'production') console.info('[KOREAN FOUNDRY INPUT]', { commonReverse: true, evidenceCount: commonResearch.koreanResults?.length ?? 0, evidence: commonResearch.koreanResults });
+        if (process.env.NODE_ENV !== 'production') console.info('[KOREAN FOUNDRY INPUT]', { commonReverse: true, evidenceCount: commonResearch.koreanResults?.length ?? 0 });
         try {
-          judgedCandidates = normalizeCandidates(await providers.judge(commonResearch));
+          judgedCandidates = alignKoreanJudgmentToCanonicalTitle(canonicalCandidates, normalizeCandidates(await providers.judge(commonResearch)));
           assertDeadline(deadlineAt);
         } catch (error) {
           if (error instanceof RequestDeadlineError) throw error;
+          diagnosticCodes.add(foundryDiagnosticCode(error));
           reverseSearchFailed = true;
         }
       }
     } catch (error) {
       if (error instanceof RequestDeadlineError) throw error;
+      diagnosticCodes.add('TAVILY_SEARCH_FAILED');
       reverseSearchFailed = true;
     }
   }
 
-  const selectedCandidates = await enrichYes24(selectSingleCandidate(preserveKoreanInvestigationStatus(judgedCandidates, korean.candidates)));
+  const selectedCandidates = await enrichYes24(
+    selectSingleCandidate(preserveKoreanInvestigationStatus(judgedCandidates, korean.candidates)),
+    linkResults,
+    deadlineAt,
+  );
   return {
     status: canonicalFailure || korean.hadFailure || reverseSearchFailed ? 'PARTIAL_SUCCESS' : 'SUCCESS',
     stages: { imageAnalysis: 'SUCCESS', finalJudgment: 'SUCCESS' },
     candidates: selectedCandidates,
     analysis,
+    ...(diagnosticCodes.size > 0 ? { diagnosticCodes: [...diagnosticCodes] } : {}),
     ...(canonicalFailure || korean.hadFailure || reverseSearchFailed ? { failureStage: 'finalJudgment' as const, failureReason: 'UPSTREAM_ERROR' as const } : {}),
   };
 }

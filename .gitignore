@@ -9,6 +9,7 @@
 node_modules/
 .next/
 .next-dev/
+.next-e2e/
 *.tsbuildinfo
 infra/main.json
 infra/validation-*.bicepparam

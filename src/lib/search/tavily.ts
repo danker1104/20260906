@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { ExternalProviderError, fetchWithTimeout, normalizeText, readJson, requiredApiKey, uniqueBy } from './provider-utils';
 import type { WebSearchResult } from './types';
+import { hashResearchCacheText, InMemoryTtlCache, redactCredentialText, withoutCredentialQueryParameters } from './memory-cache';
 
 const tavilyResponseSchema = z.object({
   results: z.array(z.object({
@@ -11,7 +12,16 @@ const tavilyResponseSchema = z.object({
   }).passthrough()).optional(),
 });
 
-export async function searchTavily(query: string): Promise<WebSearchResult[]> {
+const tavilyCache = new InMemoryTtlCache<WebSearchResult[]>({
+  clone: (results) => results.map((result) => ({
+    ...result,
+    title: redactCredentialText(result.title),
+    url: withoutCredentialQueryParameters(result.url),
+    content: redactCredentialText(result.content),
+  })),
+});
+
+async function searchTavilyUncached(query: string): Promise<WebSearchResult[]> {
   try {
     const response = await fetchWithTimeout('https://api.tavily.com/search', {
       method: 'POST',
@@ -38,4 +48,12 @@ export async function searchTavily(query: string): Promise<WebSearchResult[]> {
     if (error instanceof ExternalProviderError) throw error;
     throw new ExternalProviderError('TAVILY_ERROR');
   }
+}
+
+export function searchTavily(query: string): Promise<WebSearchResult[]> {
+  const normalizedQuery = query.trim().replace(/\s+/gu, ' ').toLocaleLowerCase();
+  return tavilyCache.getOrLoad(
+    hashResearchCacheText('tavily-basic-5-v1', normalizedQuery),
+    () => searchTavilyUncached(query),
+  );
 }
